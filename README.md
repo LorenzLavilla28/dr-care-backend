@@ -31,7 +31,7 @@ State-changing workflow operations use explicit action routes. There is intentio
 
 ## Local run
 
-For the complete macOS setup with Colima, email configuration, health checks, and troubleshooting, see [../docs/MAC_COLIMA_RUN_GUIDE.md](../docs/MAC_COLIMA_RUN_GUIDE.md).
+For the complete macOS setup with Colima, email configuration, health checks, and troubleshooting, see [docs/MAC_COLIMA_RUN_GUIDE.md](docs/MAC_COLIMA_RUN_GUIDE.md).
 
 1. Copy `.env.example` to `.env` and replace every placeholder.
 2. Start PostgreSQL and the API with `docker compose up --build`.
