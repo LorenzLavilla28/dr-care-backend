@@ -11,6 +11,7 @@ using Amazon;
 using Amazon.S3;
 using DrCare.Infrastructure.Storage;
 using DrCare.Infrastructure.Documents;
+using DrCare.Infrastructure.Email;
 
 namespace DrCare.Infrastructure;
 
@@ -23,6 +24,23 @@ public static class DependencyInjection
         services.Configure<S3Options>(configuration.GetSection(S3Options.SectionName));
         services.Configure<LocalStorageOptions>(configuration.GetSection(LocalStorageOptions.SectionName));
         services.Configure<DocumentRenderingOptions>(configuration.GetSection(DocumentRenderingOptions.SectionName));
+        services.AddOptions<EmailOptions>()
+            .Bind(configuration.GetSection(EmailOptions.SectionName))
+            .Validate(options => !options.Enabled ||
+                (!string.IsNullOrWhiteSpace(options.TenantId) &&
+                 !string.IsNullOrWhiteSpace(options.ClientId) &&
+                 !string.IsNullOrWhiteSpace(options.ClientSecret) &&
+                 System.Net.Mail.MailAddress.TryCreate(options.FromAddress, out _)),
+                "Email is enabled but the Microsoft tenant, client credentials, or sender mailbox are incomplete.")
+            .Validate(options =>
+                options.Queue.PollIntervalSeconds >= 1 &&
+                options.Queue.BatchSize is >= 1 and <= 100 &&
+                options.Queue.MaxAttempts is >= 1 and <= 20 &&
+                options.Queue.BaseRetrySeconds >= 1 &&
+                options.Queue.ProcessingTimeoutMinutes >= 1 &&
+                options.Queue.MaxTotalAttachmentBytes >= 1,
+                "Email queue settings are invalid.")
+            .ValidateOnStart();
         var storageProvider = configuration["Storage:Provider"]?.Trim();
         var useLocalStorage = storageProvider?.Equals("Local", StringComparison.OrdinalIgnoreCase) == true ||
             string.IsNullOrWhiteSpace(configuration[$"{S3Options.SectionName}:BucketName"]);
@@ -42,6 +60,14 @@ public static class DependencyInjection
             services.AddScoped<IPrivateObjectStorage, S3ObjectStorage>();
         }
         services.AddScoped<IDocumentPdfRenderer, ChromiumDocumentPdfRenderer>();
+        services.AddHttpClient("MicrosoftGraphEmail", client => client.Timeout = TimeSpan.FromSeconds(60));
+        services.AddScoped<IEmailQueue, EmailQueueService>();
+        services.AddSingleton<IEmailComposer, BrandedEmailComposer>();
+        services.AddSingleton<IApplicationLinks, ApplicationLinks>();
+        services.AddSingleton<IEmailDeliverySender, MicrosoftGraphEmailSender>();
+        services.AddScoped<EmailOutboxProcessor>();
+        services.AddHostedService<EmailOutboxWorker>();
+        services.AddHostedService<EmailDigestWorker>();
         services.AddScoped<ILeadRepository, LeadRepository>();
         services.AddScoped<ITaskRepository, TaskRepository>();
         services.AddScoped<IUserRepository, UserRepository>();

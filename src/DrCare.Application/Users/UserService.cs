@@ -12,7 +12,7 @@ public interface IUserService
     Task<DeactivateUserResponse> DeactivateAsync(Guid userId, CancellationToken cancellationToken);
 }
 
-public sealed class UserService(IUserRepository users, IPasswordService passwords, ICurrentUser currentUser) : IUserService
+public sealed class UserService(IUserRepository users, IPasswordService passwords, ICurrentUser currentUser, IEmailQueue emailQueue, IEmailComposer emailComposer, IApplicationLinks links) : IUserService
 {
     public async Task<IReadOnlyList<UserListItem>> ListAsync(CancellationToken cancellationToken)
     {
@@ -25,7 +25,11 @@ public sealed class UserService(IUserRepository users, IPasswordService password
         EnsureUserWrite();
         var user = new User(currentUser.OrganizationId, request.Email, request.DisplayName, request.Role, passwords.Hash(request.TemporaryPassword));
         await users.AddAsync(user, cancellationToken);
-        await users.SaveChangesAsync(cancellationToken);
+        var content = emailComposer.Compose(new BrandedEmailRequest(null, "Your Dr. Care staff account is ready.", "Welcome to the Dr. Care workspace", $"Hello {user.DisplayName},",
+            ["A staff account has been created for you.", "Sign in using the temporary password below, then change it immediately and keep it private."], "Open Dr. Care", links.Login(),
+            [new("Email", user.Email), new("Temporary password", request.TemporaryPassword), new("Role", user.Role.ToString())]));
+        await emailQueue.EnqueueAsync(new QueueEmailRequest(user.OrganizationId, user.Email, user.DisplayName, "Your Dr. Care staff account", content.Html, content.Text,
+            "staff-activation", IdempotencyKey: $"user:{user.Id}:activation"), cancellationToken);
         return ToItem(user);
     }
 
@@ -57,7 +61,7 @@ public sealed class UserService(IUserRepository users, IPasswordService password
 
     private void EnsureUserRead()
     {
-        if (currentUser.Role is not (UserRole.MarketingAdmin or UserRole.GeneralManager or UserRole.Leadership))
+        if (currentUser.Role is not (UserRole.MarketingAdmin or UserRole.GeneralManager or UserRole.Finance or UserRole.Leadership))
             throw new ForbiddenException("Only authorized roles can view users.");
     }
     private void EnsureUserWrite() { if (currentUser.Role != UserRole.MarketingAdmin) throw new ForbiddenException("Leadership is read-only; only the Marketing Admin can manage users."); }

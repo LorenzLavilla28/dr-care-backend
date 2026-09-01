@@ -20,6 +20,8 @@ public sealed class ReportsController(IReportService reports) : ControllerBase
 [ApiController, Route("api/v1"), Authorize, EnableRateLimiting("api")]
 public sealed class OperationalQueuesController(IReportService reports) : ControllerBase
 {
+    [HttpGet("finance/workbench"), Authorize(Roles = "Finance,Leadership")] public async Task<ActionResult<FinanceWorkbenchResponse>> FinanceWorkbench([FromQuery] FinanceWorkbenchQuery query, CancellationToken ct) => Ok(await reports.FinanceWorkbenchAsync(query, ct));
+    [HttpGet("finance/payments/{paymentId:guid}"), Authorize(Roles = "Finance,Leadership")] public async Task<ActionResult<FinancePaymentDetail>> FinancePaymentDetail(Guid paymentId, CancellationToken ct) => Ok(await reports.FinancePaymentDetailAsync(paymentId, ct));
     [HttpGet("finance/payment-queue"), Authorize(Roles = "Finance,Leadership")] public async Task<ActionResult<IReadOnlyList<QueueItem>>> Finance(CancellationToken ct) => Ok(await reports.FinanceQueueAsync(ct));
     [HttpGet("gm/contract-review-queue")] public async Task<ActionResult<IReadOnlyList<QueueItem>>> GeneralManager(CancellationToken ct) => Ok(await reports.GeneralManagerQueueAsync(ct));
     [HttpGet("admin/endorsement-queue")] public async Task<ActionResult<IReadOnlyList<QueueItem>>> Admin(CancellationToken ct) => Ok(await reports.AdminQueueAsync(ct));
@@ -28,5 +30,5 @@ public sealed class OperationalQueuesController(IReportService reports) : Contro
 [ApiController, Route("api/v1/audit-logs"), Authorize, EnableRateLimiting("api")]
 public sealed class AuditLogsController(IReportService reports) : ControllerBase
 {
-    [HttpGet] public async Task<ActionResult<IReadOnlyList<AuditLogResponse>>> List(CancellationToken ct) => Ok(await reports.AuditLogsAsync(ct));
+    [HttpGet] public async Task<ActionResult<PagedResponse<AuditLogResponse>>> List([FromQuery] Guid? leadId, [FromQuery] int page = 1, CancellationToken ct = default) => Ok(await reports.AuditLogsAsync(leadId, page, ct));
 }

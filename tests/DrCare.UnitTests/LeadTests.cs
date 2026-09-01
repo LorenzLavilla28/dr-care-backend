@@ -119,4 +119,43 @@ public sealed class LeadTests
         Assert.Throws<DomainRuleException>(() => checklist.Complete());
         Assert.Equal("IN_PROGRESS", checklist.Status);
     }
+
+    [Fact]
+    public void Contract_revision_retains_reason_actor_and_timestamp()
+    {
+        var contract = new Contract(Guid.NewGuid(), Guid.NewGuid(), "STANDARD_FRANCHISE", "2026.07");
+        var reviewerId = Guid.NewGuid();
+        contract.SubmitReview();
+
+        contract.RequestRevision("  Correct the franchise site address.  ", reviewerId);
+
+        Assert.Equal(ContractStatus.RevisionRequested, contract.Status);
+        Assert.Equal("Correct the franchise site address.", contract.RevisionReason);
+        Assert.Equal(reviewerId, contract.RevisionRequestedBy);
+        Assert.NotNull(contract.RevisionRequestedAt);
+    }
+
+    [Fact]
+    public void Contract_revision_rejects_an_empty_reason()
+    {
+        var contract = new Contract(Guid.NewGuid(), Guid.NewGuid(), "STANDARD_FRANCHISE", "2026.07");
+
+        Assert.Throws<DomainRuleException>(() => contract.RequestRevision("  ", Guid.NewGuid()));
+    }
+
+    [Fact]
+    public void Location_analysis_requires_review_submission_before_approval()
+    {
+        var analysis = new LocationAnalysis(Guid.NewGuid(), Guid.NewGuid(), "Makati City");
+
+        Assert.Equal("Draft", analysis.Status);
+        Assert.Throws<DomainRuleException>(() => analysis.Evaluate("Approved", null, Guid.NewGuid()));
+
+        analysis.Submit(Guid.NewGuid());
+
+        Assert.Equal("Submitted", analysis.Status);
+        analysis.Evaluate("Approved", "Verified by GM", Guid.NewGuid());
+        Assert.Equal("Approved", analysis.Status);
+        Assert.Equal("Verified by GM", analysis.ReviewNotes);
+    }
 }

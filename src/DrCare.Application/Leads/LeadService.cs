@@ -1,3 +1,4 @@
+using System.Text.Json;
 using DrCare.Domain;
 using DrCare.Application.Contracts;
 using DrCare.Application.Notifications;
@@ -23,11 +24,12 @@ public interface ILeadService
     Task<LeadDetails> AssignAsync(Guid leadId, AssignLeadRequest request, CancellationToken cancellationToken);
     Task<LocationAnalysisResponse> GetLocationAnalysisAsync(Guid leadId, CancellationToken cancellationToken);
     Task<LocationAnalysisResponse> UpdateLocationAnalysisAsync(Guid leadId, UpdateLocationAnalysisRequest request, CancellationToken cancellationToken);
+    Task<LocationAnalysisResponse> SubmitLocationAnalysisAsync(Guid leadId, SubmitLocationAnalysisRequest request, CancellationToken cancellationToken);
     Task<LocationEvaluationResponse> EvaluateLocationAnalysisAsync(Guid leadId, LocationEvaluationRequest request, CancellationToken cancellationToken);
-    Task<IReadOnlyList<ActivityResponse>> GetActivitiesAsync(Guid leadId, CancellationToken cancellationToken);
+    Task<PagedResponse<ActivityResponse>> GetActivitiesAsync(Guid leadId, int page, CancellationToken cancellationToken);
 }
 
-public sealed class LeadService(ILeadRepository leads, IProcessRepository processes, ITaskRepository tasks, IUserRepository users, ISettingsService settings, ICurrentUser currentUser, INotificationService notifications) : ILeadService
+public sealed class LeadService(ILeadRepository leads, IProcessRepository processes, ITaskRepository tasks, IUserRepository users, ISettingsService settings, ICurrentUser currentUser, INotificationService notifications, IEmailQueue emailQueue, IEmailComposer emailComposer) : ILeadService
 {
     public async Task<LeadPage> SearchAsync(LeadState? state, ProductLine? productLine, Guid? assignedAgentId, DateTimeOffset? createdFrom, DateTimeOffset? createdTo, string? search, string? cursor, int page, int pageSize, string sort, CancellationToken cancellationToken)
     {
@@ -113,7 +115,10 @@ public sealed class LeadService(ILeadRepository leads, IProcessRepository proces
                 await leads.AddLocationAnalysisAsync(lead.LocationAnalysis, cancellationToken);
             else if (lead.LocationAnalysis is not null &&
                      !lead.LocationAnalysis.PreferredLocation.Equals(lead.PreferredLocation, StringComparison.Ordinal))
-                lead.LocationAnalysis.Update(lead.PreferredLocation, lead.LocationAnalysis.Notes);
+            {
+                try { lead.LocationAnalysis.Update(lead.PreferredLocation, lead.LocationAnalysis.Notes); }
+                catch (DomainRuleException ex) { throw new ConflictException(ex.Message); }
+            }
         }
         var activity = new ActivityLog(currentUser.OrganizationId, lead.Id, currentUser.UserId, ActivityType.InquiryUpdated, "Inquiry details updated.");
         lead.AddActivity(activity);
@@ -146,6 +151,11 @@ public sealed class LeadService(ILeadRepository leads, IProcessRepository proces
             lead.AddActivity(welcomeActivity);
             await leads.AddActivityAsync(welcomeActivity, cancellationToken);
             await notifications.NotifyUserAsync(currentUser.OrganizationId, lead.AssignedAgentId, "welcome-email-queued", "Welcome email queued", $"The welcome email for {lead.FullName} is queued for delivery.", cancellationToken);
+            var welcome = emailComposer.Compose(new BrandedEmailRequest(lead.ProductLine, "Welcome to Dr. Care.", "Thank you for your franchise inquiry", $"Hello {lead.FullName},",
+                ["We received your franchise inquiry and our team will guide you through the next steps.", "Your assigned representative will contact you using the details you provided."],
+                Details: [new("Reference", lead.Id.ToString("N")[..8].ToUpperInvariant()), new("Preferred location", lead.PreferredLocation ?? "To be discussed")]));
+            await emailQueue.EnqueueAsync(new QueueEmailRequest(lead.OrganizationId, lead.Email, lead.FullName, "We received your Dr. Care franchise inquiry", welcome.Html, welcome.Text,
+                "welcome", IdempotencyKey: $"lead:{lead.Id}:welcome"), cancellationToken);
         }
         else
         {
@@ -174,7 +184,7 @@ public sealed class LeadService(ILeadRepository leads, IProcessRepository proces
     public async Task<NurturingResponse> GetNurturingAsync(Guid leadId, CancellationToken cancellationToken)
     {
         var lead = await GetOwnedLeadAsync(leadId, cancellationToken);
-        return ToNurturing(lead);
+        return await ToNurturingAsync(lead, cancellationToken);
     }
 
     public async Task<NurturingResponse> UpdateNurturingAsync(Guid leadId, UpdateNurturingRequest request, CancellationToken cancellationToken)
@@ -195,7 +205,7 @@ public sealed class LeadService(ILeadRepository leads, IProcessRepository proces
         lead.AddActivity(activity);
         await leads.AddActivityAsync(activity, cancellationToken);
         await leads.SaveChangesAsync(cancellationToken);
-        return ToNurturing(lead);
+        return await ToNurturingAsync(lead, cancellationToken);
     }
 
     public async Task<CallOutcomeResponse> RecordCallOutcomeAsync(Guid leadId, CallOutcomeRequest request, CancellationToken cancellationToken)
@@ -203,7 +213,7 @@ public sealed class LeadService(ILeadRepository leads, IProcessRepository proces
         EnsureMarketingWriteAccess();
         var lead = await GetOwnedLeadAsync(leadId, cancellationToken);
         EnsureVersion(lead, request.ExpectedVersion);
-        try { lead.RecordCallOutcome(request.Outcome, request.WelcomeEmailReceived, request.GoodTimeToDiscuss, request.Notes); }
+        try { lead.RecordCallOutcome(request.Outcome, request.GoodTimeToDiscuss, request.Notes); }
         catch (DomainRuleException ex) { throw new ConflictException(ex.Message); }
         Guid? taskId = null;
         if (request.FollowUpAt.HasValue && await tasks.FindOpenByLeadAndTitleAsync(currentUser.OrganizationId, lead.Id, "Nurturing follow-up.", cancellationToken) is null)
@@ -278,44 +288,87 @@ public sealed class LeadService(ILeadRepository leads, IProcessRepository proces
     {
         var lead = await GetOwnedLeadAsync(leadId, cancellationToken);
         if (lead.LocationAnalysis is null) throw new NotFoundException("Location analysis has not been initialized.");
-        return ToLocation(lead.LocationAnalysis);
+        return await ToLocationAsync(lead, lead.LocationAnalysis, cancellationToken);
     }
 
     public async Task<LocationAnalysisResponse> UpdateLocationAnalysisAsync(Guid leadId, UpdateLocationAnalysisRequest request, CancellationToken cancellationToken)
     {
-        EnsureMarketingWriteAccess();
+        EnsureLocationEditorAccess();
         var lead = await GetOwnedLeadAsync(leadId, cancellationToken);
         EnsureVersion(lead, request.ExpectedVersion);
         var hadLocationAnalysis = lead.LocationAnalysis is not null;
         lead.SetLocationAnalysis();
         if (lead.LocationAnalysis is null) throw new ConflictException("A preferred location is required before analysis can be updated.");
         if (!hadLocationAnalysis) await leads.AddLocationAnalysisAsync(lead.LocationAnalysis, cancellationToken);
-        lead.LocationAnalysis.Update(request.PreferredLocation, request.Notes);
+        var answers = request.Answers is null ? ParseAnswers(lead.LocationAnalysis.AssessmentJson) : NormalizeAnswers(request.Answers);
+        try
+        {
+            lead.LocationAnalysis.UpdateAssessment(request.PreferredLocation, request.LeaseOwnershipStatus ?? lead.LocationAnalysis.LeaseOwnershipStatus, request.Notes, JsonSerializer.Serialize(answers));
+        }
+        catch (DomainRuleException ex) { throw new ConflictException(ex.Message); }
+        var activity = new ActivityLog(currentUser.OrganizationId, lead.Id, currentUser.UserId, ActivityType.LocationAnalysisUpdated, "Location analysis draft updated.");
+        lead.AddActivity(activity); await leads.AddActivityAsync(activity, cancellationToken);
         await leads.SaveChangesAsync(cancellationToken);
-        return ToLocation(lead.LocationAnalysis);
+        return await ToLocationAsync(lead, lead.LocationAnalysis, cancellationToken);
+    }
+
+    public async Task<LocationAnalysisResponse> SubmitLocationAnalysisAsync(Guid leadId, SubmitLocationAnalysisRequest request, CancellationToken cancellationToken)
+    {
+        EnsureLocationEditorAccess();
+        var lead = await GetOwnedLeadAsync(leadId, cancellationToken);
+        EnsureVersion(lead, request.ExpectedVersion);
+        var analysis = lead.LocationAnalysis ?? throw new ConflictException("Complete the location analysis draft before submitting it.");
+        var answers = NormalizeAnswers(ParseAnswers(analysis.AssessmentJson));
+        var missing = LocationAnalysisCatalog.Questions.Count(q => answers.All(a => !a.QuestionCode.Equals(q.Code, StringComparison.Ordinal)));
+        if (missing > 0) throw new ConflictException($"Answer all {LocationAnalysisCatalog.Questions.Count} location criteria before submitting. {missing} remain.");
+        if (!LocationAnalysisCatalog.IsValidLeaseStatus(analysis.LeaseOwnershipStatus)) throw new ConflictException("Select the lease or ownership status before submitting.");
+        try { analysis.Submit(currentUser.UserId); }
+        catch (DomainRuleException ex) { throw new ConflictException(ex.Message); }
+        var activity = new ActivityLog(currentUser.OrganizationId, lead.Id, currentUser.UserId, ActivityType.LocationAnalysisSubmitted, "Location analysis submitted for General Manager review.");
+        lead.AddActivity(activity); await leads.AddActivityAsync(activity, cancellationToken);
+        await notifications.NotifyRoleAsync(currentUser.OrganizationId, UserRole.GeneralManager, "location-analysis-submitted", "Location analysis review required", $"{lead.FullName}'s location analysis is ready for review.", cancellationToken);
+        await leads.SaveChangesAsync(cancellationToken);
+        return await ToLocationAsync(lead, analysis, cancellationToken);
     }
 
     public async Task<LocationEvaluationResponse> EvaluateLocationAnalysisAsync(Guid leadId, LocationEvaluationRequest request, CancellationToken cancellationToken)
     {
-        EnsureMarketingWriteAccess();
+        EnsureLocationReviewerAccess();
         var lead = await GetOwnedLeadAsync(leadId, cancellationToken);
         EnsureVersion(lead, request.ExpectedVersion);
-        var hadLocationAnalysis = lead.LocationAnalysis is not null;
-        lead.SetLocationAnalysis();
-        if (lead.LocationAnalysis is null) throw new ConflictException("A preferred location is required before analysis can be evaluated.");
-        if (!hadLocationAnalysis) await leads.AddLocationAnalysisAsync(lead.LocationAnalysis, cancellationToken);
-        lead.LocationAnalysis.Evaluate(request.Decision, request.Notes, currentUser.UserId);
+        var analysis = lead.LocationAnalysis ?? throw new ConflictException("Location analysis has not been initialized.");
+        if (!NormalizeLocationStatus(analysis.Status).Equals("Submitted", StringComparison.Ordinal)) throw new ConflictException("Location analysis must be submitted before review.");
+        var answers = NormalizeAnswers(ParseAnswers(analysis.AssessmentJson));
+        if (answers.Count != LocationAnalysisCatalog.Questions.Count) throw new ConflictException("All location criteria must be answered before approval.");
+        try { analysis.Evaluate(request.Decision, request.Notes, currentUser.UserId); }
+        catch (DomainRuleException ex) { throw new ConflictException(ex.Message); }
+        var approved = NormalizeLocationStatus(analysis.Status) == "Approved";
+        var activityType = approved ? ActivityType.LocationAnalysisApproved : ActivityType.LocationAnalysisReturned;
+        var activityMessage = approved ? "Location analysis approved by General Manager." : $"Location analysis returned for revision. {analysis.RevisionReason}";
+        var activity = new ActivityLog(currentUser.OrganizationId, lead.Id, currentUser.UserId, activityType, activityMessage);
+        lead.AddActivity(activity); await leads.AddActivityAsync(activity, cancellationToken);
+        if (approved)
+            await notifications.NotifyUserAsync(currentUser.OrganizationId, lead.AssignedAgentId, "location-analysis-approved", "Location analysis approved", $"The General Manager approved the location analysis for {lead.FullName}.", cancellationToken);
+        else
+        {
+            await notifications.NotifyUserAsync(currentUser.OrganizationId, lead.AssignedAgentId, "location-analysis-returned", "Location analysis changes requested", $"The General Manager returned {lead.FullName}'s location analysis. Reason: {analysis.RevisionReason}", cancellationToken);
+            await notifications.NotifyRoleAsync(currentUser.OrganizationId, UserRole.MarketingAdmin, "location-analysis-returned", "Location analysis changes requested", $"The General Manager returned {lead.FullName}'s location analysis. Reason: {analysis.RevisionReason}", cancellationToken, lead.AssignedAgentId);
+        }
         await leads.SaveChangesAsync(cancellationToken);
-        return new LocationEvaluationResponse(lead.Id, lead.LocationAnalysis.Status, lead.LocationAnalysis.Notes, lead.LocationAnalysis.EvaluatedAt ?? lead.LocationAnalysis.UpdatedAt, lead.State);
+        return new LocationEvaluationResponse(lead.Id, NormalizeLocationStatus(analysis.Status), analysis.ReviewNotes, analysis.EvaluatedAt ?? analysis.UpdatedAt, lead.State);
     }
 
-    public async Task<IReadOnlyList<ActivityResponse>> GetActivitiesAsync(Guid leadId, CancellationToken cancellationToken)
+    public async Task<PagedResponse<ActivityResponse>> GetActivitiesAsync(Guid leadId, int page, CancellationToken cancellationToken)
     {
         var lead = await GetOwnedLeadAsync(leadId, cancellationToken);
+        page = Math.Clamp(page, 1, 10_000);
+        const int pageSize = 10;
+        var result = await leads.ListActivitiesAsync(currentUser.OrganizationId, leadId, (page - 1) * pageSize, pageSize, cancellationToken);
         var actorNames = (await users.ListAsync(currentUser.OrganizationId, cancellationToken))
             .ToDictionary(x => x.Id, x => x.DisplayName);
-        return lead.Activities.OrderByDescending(x => x.CreatedAt)
+        var items = result.Items
             .Select(x => new ActivityResponse(x.Id, x.Type, x.Message, x.FromState, x.ToState, x.CreatedAt, actorNames.GetValueOrDefault(x.ActorId, "System"))).ToArray();
+        return new PagedResponse<ActivityResponse>(items, page, pageSize, result.Total);
     }
 
     private async Task<Lead> GetOwnedLeadAsync(Guid leadId, CancellationToken cancellationToken)
@@ -348,16 +401,73 @@ public sealed class LeadService(ILeadRepository leads, IProcessRepository proces
         var payment = x.State == LeadState.DownPaymentPending
             ? await processes.GetDownPaymentAsync(currentUser.OrganizationId, x.Id, ct)
             : null;
-        return new(x.Id, x.FullName, x.Age, x.ContactNumber, x.Email, x.SourceOfIncome, x.LeadSource, x.Address, x.Industry, x.MeetingDateTime, x.QuestionsConcerns, x.PreferredLocation, x.ProductLine, x.ListPrice, x.ActualPrice, x.WelcomeEmailReceived, x.GoodTimeToDiscuss, x.LastCallOutcome, x.State, x.AssignedAgentId, assignedAgent?.DisplayName ?? "Unknown agent", x.CreatedAt, x.UpdatedAt, x.Version, x.LocationAnalysis is not null && x.LocationAnalysis.Status == "PENDING", payment?.SubmittedAt is not null);
+        var welcome = await emailQueue.FindAsync(x.OrganizationId, $"lead:{x.Id}:welcome", ct);
+        return new(x.Id, x.FullName, x.Age, x.ContactNumber, x.Email, x.SourceOfIncome, x.LeadSource, x.Address, x.Industry, x.MeetingDateTime, x.QuestionsConcerns, x.PreferredLocation, x.ProductLine, x.ListPrice, x.ActualPrice, welcome?.Status.ToString() ?? "NotQueued", welcome?.QueuedAt, welcome?.SentAt, x.GoodTimeToDiscuss, x.LastCallOutcome, x.State, x.AssignedAgentId, assignedAgent?.DisplayName ?? "Unknown agent", x.CreatedAt, x.UpdatedAt, x.Version, x.LocationAnalysis is not null && NormalizeLocationStatus(x.LocationAnalysis.Status) != "Approved", payment?.SubmittedAt is not null);
     }
-    private static NurturingResponse ToNurturing(Lead x) => new(x.Id, x.NurturingNotes, x.LastContactedAt, x.WelcomeEmailReceived, x.GoodTimeToDiscuss, x.LastCallOutcome, x.ProductLine, x.ListPrice, x.ActualPrice, x.UpdatedAt, x.Version);
+    private async Task<NurturingResponse> ToNurturingAsync(Lead x, CancellationToken ct)
+    {
+        var welcome = await emailQueue.FindAsync(x.OrganizationId, $"lead:{x.Id}:welcome", ct);
+        return new(x.Id, x.NurturingNotes, x.LastContactedAt, welcome?.Status.ToString() ?? "NotQueued", welcome?.QueuedAt, welcome?.SentAt, x.GoodTimeToDiscuss, x.LastCallOutcome, x.ProductLine, x.ListPrice, x.ActualPrice, x.UpdatedAt, x.Version);
+    }
     private static decimal PriceFor(ProductLine productLine, PricingSettingsResponse pricing) => productLine switch { ProductLine.Abc => pricing.AbcPrice, ProductLine.Pharmacy => pricing.PharmacyPrice, _ => pricing.ComboPrice };
     private async Task EnsureValidAgentAsync(Guid agentId, CancellationToken cancellationToken)
     {
         var agent = await users.GetAsync(currentUser.OrganizationId, agentId, cancellationToken);
-        if (agent is null || !agent.IsActive || agent.Role != UserRole.MarketingAgent) throw new ValidationException("Assigned agent must be an active Marketing Agent in this organization.");
+        if (agent is null || !agent.IsActive || agent.Role is not (UserRole.MarketingAgent or UserRole.MarketingAdmin))
+            throw new ValidationException("The owner must be an active Marketing Agent or Marketing Admin in this organization.");
     }
-    private static LocationAnalysisResponse ToLocation(LocationAnalysis x) => new(x.LeadId, x.PreferredLocation, x.Status, x.Notes, x.UpdatedAt);
+    private void EnsureLocationEditorAccess()
+    {
+        if (currentUser.Role is not (UserRole.MarketingAgent or UserRole.MarketingAdmin))
+            throw new ForbiddenException("Only Marketing Agents and Marketing Admins can edit location analysis.");
+    }
+
+    private void EnsureLocationReviewerAccess()
+    {
+        if (currentUser.Role != UserRole.GeneralManager)
+            throw new ForbiddenException("Only a General Manager can review location analysis.");
+    }
+
+    private static IReadOnlyList<LocationAnalysisAnswer> NormalizeAnswers(IEnumerable<LocationAnalysisAnswer> answers)
+    {
+        var normalized = new List<LocationAnalysisAnswer>();
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var answer in answers)
+        {
+            var code = answer.QuestionCode.Trim().ToUpperInvariant();
+            var response = answer.Response.Trim().ToUpperInvariant();
+            if (!LocationAnalysisCatalog.IsValidQuestion(code)) throw new ValidationException($"Unknown location criterion '{answer.QuestionCode}'.");
+            if (!LocationAnalysisCatalog.IsValidResponse(response)) throw new ValidationException($"Invalid response for location criterion '{code}'.");
+            if (!seen.Add(code)) throw new ValidationException($"Location criterion '{code}' was submitted more than once.");
+            normalized.Add(new LocationAnalysisAnswer(code, response, string.IsNullOrWhiteSpace(answer.Remark) ? null : answer.Remark.Trim()));
+        }
+        return normalized.OrderBy(x => Array.FindIndex(LocationAnalysisCatalog.Questions.ToArray(), q => q.Code == x.QuestionCode)).ToArray();
+    }
+
+    private static IReadOnlyList<LocationAnalysisAnswer> ParseAnswers(string? json)
+    {
+        if (string.IsNullOrWhiteSpace(json)) return [];
+        try { return JsonSerializer.Deserialize<List<LocationAnalysisAnswer>>(json) ?? []; }
+        catch (JsonException) { return []; }
+    }
+
+    private static string NormalizeLocationStatus(string? status) => status switch
+    {
+        "PENDING" or "Pending" or "Draft" => "Draft",
+        "Passed" or "Approved" => "Approved",
+        "Failed" or "Returned" => "Returned",
+        "Submitted" => "Submitted",
+        _ => "Draft",
+    };
+
+    private async Task<LocationAnalysisResponse> ToLocationAsync(Lead lead, LocationAnalysis x, CancellationToken ct)
+    {
+        var submittedBy = x.SubmittedBy.HasValue ? await users.GetAsync(currentUser.OrganizationId, x.SubmittedBy.Value, ct) : null;
+        var evaluatedBy = x.EvaluatedBy.HasValue ? await users.GetAsync(currentUser.OrganizationId, x.EvaluatedBy.Value, ct) : null;
+        var answers = NormalizeAnswers(ParseAnswers(x.AssessmentJson));
+        var questions = LocationAnalysisCatalog.Questions.Select(q => new LocationAnalysisQuestion(q.Code, q.Group, q.Prompt, q.Hint)).ToArray();
+        return new(x.LeadId, lead.FullName, x.PreferredLocation, x.LeaseOwnershipStatus, NormalizeLocationStatus(x.Status), x.Notes, x.ReviewNotes, x.UpdatedAt, answers, questions.Length, answers.Count, x.SubmittedAt, submittedBy?.DisplayName, x.EvaluatedAt, evaluatedBy?.DisplayName, x.RevisionReason, questions);
+    }
     private static void EnsureVersion(Lead lead, int? expectedVersion)
     {
         if (expectedVersion.HasValue && expectedVersion.Value != lead.Version)

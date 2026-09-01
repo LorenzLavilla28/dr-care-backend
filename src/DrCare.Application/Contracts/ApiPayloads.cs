@@ -28,12 +28,37 @@ public sealed record ReferenceDataItem(string Code, string Name, bool Active = t
 public sealed record ChecklistTemplateItem(string Code, string Name, bool Required, string? AppliesTo = null);
 
 public sealed record AssignLeadRequest([param: Required] Guid AssignedAgentId, int? ExpectedVersion = null);
-public sealed record LocationAnalysisResponse(Guid LeadId, string PreferredLocation, string Status, string? Notes, DateTimeOffset UpdatedAt);
+public sealed record LocationAnalysisAnswer(
+    [param: Required, MaxLength(40)] string QuestionCode,
+    [param: Required, RegularExpression("^(YES_COMPLETELY|YES_PARTIALLY|NO|DONT_KNOW)$")] string Response,
+    [param: MaxLength(1000)] string? Remark = null);
+public sealed record LocationAnalysisQuestion(string Code, string Group, string Prompt, string? Hint);
+public sealed record LocationAnalysisResponse(
+    Guid LeadId,
+    string CandidateName,
+    string PreferredLocation,
+    string LeaseOwnershipStatus,
+    string Status,
+    string? Notes,
+    string? ReviewNotes,
+    DateTimeOffset UpdatedAt,
+    IReadOnlyList<LocationAnalysisAnswer> Answers,
+    int QuestionCount,
+    int AnsweredCount,
+    DateTimeOffset? SubmittedAt,
+    string? SubmittedByName,
+    DateTimeOffset? EvaluatedAt,
+    string? EvaluatedByName,
+    string? RevisionReason,
+    IReadOnlyList<LocationAnalysisQuestion> Questions);
 public sealed record UpdateLocationAnalysisRequest(
     [param: Required, MinLength(2), MaxLength(240)] string PreferredLocation,
+    [param: MaxLength(40)] string? LeaseOwnershipStatus = null,
+    [param: MaxLength(31)] IReadOnlyList<LocationAnalysisAnswer>? Answers = null,
     [param: MaxLength(2000)] string? Notes = null,
     int? ExpectedVersion = null);
-public sealed record LocationEvaluationRequest([param: Required, RegularExpression("^(Pending|Passed|Failed)$")] string Decision, [param: MaxLength(2000)] string? Notes = null, int? ExpectedVersion = null);
+public sealed record SubmitLocationAnalysisRequest(int? ExpectedVersion = null);
+public sealed record LocationEvaluationRequest([param: Required, RegularExpression("^(Pending|Passed|Failed|Approved|Returned)$")] string Decision, [param: MaxLength(2000)] string? Notes = null, int? ExpectedVersion = null);
 public sealed record LocationEvaluationResponse(Guid LeadId, string Decision, string? Notes, DateTimeOffset EvaluatedAt, LeadState State);
 
 public sealed record AddActivityRequest(
@@ -49,8 +74,7 @@ public sealed record UpdateNurturingRequest(
 public sealed record WelcomeEmailResponse(Guid LeadId, string Status, DateTimeOffset QueuedAt);
 public sealed record CallOutcomeRequest(
     [param: Required, MaxLength(40)] string Outcome,
-    [param: Required, RegularExpression("^(Yes|No|Unknown)$")] string WelcomeEmailReceived,
-    [param: Required, RegularExpression("^(Yes|No|Unknown)$")] string GoodTimeToDiscuss,
+    [param: Required, MinLength(2), MaxLength(40)] string GoodTimeToDiscuss,
     [param: MaxLength(4000)] string? Notes = null,
     DateTimeOffset? FollowUpAt = null,
     int? ExpectedVersion = null);
@@ -63,6 +87,7 @@ public sealed record QualificationRequest(
 public sealed record QualificationResponse(Guid LeadId, LeadState State, bool Qualified, DateTimeOffset EvaluatedAt);
 
 public sealed record TaskResponse(Guid Id, Guid LeadId, Guid AssignedTo, string Title, DrCare.Domain.TaskStatus Status, DateTimeOffset CreatedAt, DateTimeOffset? DueAt);
+public sealed record CompletedWorkItemResponse(Guid Id, Guid LeadId, string Title, string Detail, string Kind, DateTimeOffset CompletedAt);
 public sealed record CreateTaskRequest(
     [param: Required, MinLength(2), MaxLength(240)] string Title,
     Guid? AssignedTo = null,
@@ -70,7 +95,7 @@ public sealed record CreateTaskRequest(
     Guid? LeadId = null);
 public sealed record CompleteTaskRequest([param: MaxLength(1000)] string? CompletionNote = null, int? ExpectedVersion = null);
 public sealed record SnoozeTaskRequest([param: Required] DateTimeOffset DueAt);
-public sealed record NurturingResponse(Guid LeadId, string? Notes, DateTimeOffset? LastContactedAt, string? WelcomeEmailReceived, string? GoodTimeToDiscuss, string? LastCallOutcome, ProductLine? ProductLine, decimal? ListPrice, decimal? ActualPrice, DateTimeOffset UpdatedAt, int Version);
+public sealed record NurturingResponse(Guid LeadId, string? Notes, DateTimeOffset? LastContactedAt, string WelcomeEmailStatus, DateTimeOffset? WelcomeEmailQueuedAt, DateTimeOffset? WelcomeEmailSentAt, string? GoodTimeToDiscuss, string? LastCallOutcome, ProductLine? ProductLine, decimal? ListPrice, decimal? ActualPrice, DateTimeOffset UpdatedAt, int Version);
 
 public sealed record DownPaymentResponse(Guid LeadId, decimal Amount, string Currency, string Status, string? InvoiceNumber, DateTimeOffset? ConfirmedAt, bool DocumentsComplete, bool SubmittedForFinance, DateTimeOffset? SubmittedAt, Guid? SubmittedBy);
 public sealed record CreateInvoiceRequest([param: Range(typeof(decimal), "0.01", "1000000000")] decimal? Amount = null, [param: MaxLength(3)] string Currency = "PHP", int? ExpectedVersion = null);
@@ -99,7 +124,7 @@ public sealed record GenerateContractRequest(
     [param: Required, MaxLength(80)] string TemplateCode,
     [param: MaxLength(32)] string Version = "1",
     int? ExpectedVersion = null);
-public sealed record ContractResponse(Guid LeadId, Guid ContractId, string Status, string TemplateCode, string Version, DateTimeOffset UpdatedAt, string? DownloadUrl = null, bool GmApproved = false, string? FranchiseeSignerName = null, DateTimeOffset? FranchiseeSignedAt = null, string? DrCareSignerName = null, DateTimeOffset? DrCareSignedAt = null);
+public sealed record ContractResponse(Guid LeadId, Guid ContractId, string Status, string TemplateCode, string Version, DateTimeOffset UpdatedAt, string? DownloadUrl = null, bool GmApproved = false, string? FranchiseeSignerName = null, DateTimeOffset? FranchiseeSignedAt = null, string? DrCareSignerName = null, DateTimeOffset? DrCareSignedAt = null, string? RevisionReason = null, DateTimeOffset? RevisionRequestedAt = null, Guid? RevisionRequestedBy = null, string? RevisionRequestedByName = null);
 public sealed record SubmitContractReviewRequest([param: MaxLength(4000)] string? Notes = null, int? ExpectedVersion = null);
 public sealed record ContractChecklistItem(Guid Id, string Code, string Name, bool Required, bool Complete, string? Notes);
 public sealed record ContractChecklistResponse(Guid LeadId, IReadOnlyList<ContractChecklistItem> Items, bool Complete, int? ExpectedVersion = null);
@@ -117,17 +142,19 @@ public sealed record CreateSigningRequest(
     [param: Required, MinLength(2), MaxLength(160)] string SignerName,
     [param: Required, EmailAddress, MaxLength(254)] string SignerEmail,
     [param: Range(1, 30)] int ExpiresInDays = 7);
-public sealed record SigningRequestResponse(Guid Id, Guid LeadId, Guid ContractId, string SignerRole, string SignerName, string SignerEmail, string Status, DateTimeOffset ExpiresAt, DateTimeOffset? SignedAt, string? SigningUrl = null);
+public sealed record SigningRequestResponse(Guid Id, Guid LeadId, Guid ContractId, string SignerRole, string SignerName, string SignerEmail, string Status, DateTimeOffset ExpiresAt, DateTimeOffset? SignedAt, bool EmailQueued, string? SigningUrl = null);
 public sealed record PublicSigningResponse(Guid RequestId, string SignerRole, string SignerName, string ContractStatus, DateTimeOffset ExpiresAt, bool AlreadySigned, string? DocumentUrl = null);
 public sealed record SignContractRequest([param: Required, MinLength(2), MaxLength(160)] string SignerName, [param: Required] bool AcceptedTerms, [param: Required, MaxLength(400000)] string SignatureData);
 public sealed record DeclineSigningRequest([param: MaxLength(1000)] string? Reason = null);
 
 public sealed record PreLaunchResponse(Guid LeadId, string Status, ProductLine? ProductLine, IReadOnlyList<PreLaunchItemResponse> Items, DateTimeOffset UpdatedAt);
 public sealed record PreLaunchItemResponse(Guid Id, string Code, string Name, bool Required, bool Complete, bool Paused, string? Notes, DateTimeOffset? CompletedAt);
-public sealed record InitializePreLaunchRequest(bool NurseOrDoctorAvailable = false);
+public sealed record InitializePreLaunchRequest(
+    bool NurseOrDoctorAvailable = false,
+    bool ConfirmSignedContractReview = false);
 public sealed record UpdatePreLaunchItemRequest(bool Complete, [param: MaxLength(2000)] string? Notes = null, int? ExpectedVersion = null);
 public sealed record SendVideoRequest([param: Required, Url, MaxLength(2000)] string VideoUrl, [param: MaxLength(1000)] string? Message = null);
-public sealed record SendVideoResponse(Guid LeadId, string Status, DateTimeOffset SentAt);
+public sealed record SendVideoResponse(Guid LeadId, Guid QueueId, string Status, DateTimeOffset QueuedAt);
 public sealed record CompletePreLaunchRequest([param: MaxLength(2000)] string? Notes = null, int? ExpectedVersion = null);
 public sealed record CompletePreLaunchResponse(Guid LeadId, string Status, DateTimeOffset CompletedAt);
 
@@ -140,13 +167,52 @@ public sealed record HandoffBoundaryItem([param: Required, MaxLength(80)] string
 public sealed record EndorsementResponse(Guid Id, Guid LeadId, string ReceivingTeam, string Status, string HandoffNotes, IReadOnlyList<HandoffBoundaryItem> Items, DateTimeOffset CreatedAt, DateTimeOffset? AcknowledgedAt);
 
 public sealed record QueueItem(Guid LeadId, string FullName, LeadState State, DateTimeOffset UpdatedAt, int Version);
+public sealed record FinanceWorkbenchQuery(
+    [param: MaxLength(20)] string View = "action",
+    [param: MaxLength(40)] string Status = "all",
+    [param: MaxLength(200)] string? Search = null,
+    DateTimeOffset? From = null,
+    DateTimeOffset? To = null,
+    Guid? OwnerId = null,
+    [param: Range(1, 10_000)] int Page = 1,
+    [param: Range(1, 100)] int PageSize = 20);
+public sealed record FinancePaymentItem(
+    Guid PaymentId,
+    Guid LeadId,
+    string LeadName,
+    string? Location,
+    LeadState LeadState,
+    Guid OwnerId,
+    string OwnerName,
+    string? InvoiceNumber,
+    decimal Amount,
+    string Currency,
+    string Status,
+    DateTimeOffset ActivityAt,
+    DateTimeOffset? SubmittedAt,
+    DateTimeOffset? ConfirmedAt,
+    string? SubmittedByName,
+    string? ConfirmedByName,
+    string? ConfirmationReference,
+    bool HasPaymentEvidence);
+public sealed record FinancePaymentEvent(Guid Id, string Type, string Message, DateTimeOffset CreatedAt, string ActorName);
+public sealed record FinancePaymentDetail(FinancePaymentItem Payment, IReadOnlyList<FinancePaymentEvent> Events, IReadOnlyList<DocumentResponse> EvidenceDocuments);
+public sealed record FinanceWorkbenchResponse(
+    IReadOnlyList<FinancePaymentItem> Items,
+    int Page,
+    int PageSize,
+    int Total,
+    int AwaitingCount,
+    decimal PendingAmount,
+    decimal ConfirmedThisMonth,
+    int ExceptionCount);
 public sealed record PipelineReport(IReadOnlyDictionary<string, int> Counts, DateTimeOffset GeneratedAt);
 public sealed record ReportQuery(DateTimeOffset? From = null, DateTimeOffset? To = null, Guid? AgentId = null);
 public sealed record OverviewReport(int TotalLeads, IReadOnlyDictionary<string, int> ByState, decimal ConfirmedDownPayments, DateTimeOffset GeneratedAt);
 public sealed record ConversionReport(IReadOnlyDictionary<string, decimal> Rates, DateTimeOffset From, DateTimeOffset To);
 public sealed record GoalReport(int Year, int Target, int Achieved, decimal CompletionPercentage);
-public sealed record LeaderboardItem(Guid AgentId, string AgentName, int Leads, int Qualified, int Endorsed);
-public sealed record DownPaymentReport(decimal TotalInvoiced, decimal TotalConfirmed, int PendingCount, DateTimeOffset From, DateTimeOffset To);
+public sealed record LeaderboardItem(Guid AgentId, string AgentName, int Leads, int Qualified, int Endorsed, decimal ConfirmedRevenue = 0);
+public sealed record DownPaymentReport(decimal TotalInvoiced, decimal TotalConfirmed, int PendingCount, DateTimeOffset From, DateTimeOffset To, decimal PendingAmount = 0);
 public sealed record AnnualGoalSettingsResponse(int Year, int Target, DateTimeOffset UpdatedAt);
 public sealed record UpdateAnnualGoalSettingsRequest([param: Range(1, 1000000)] int Target);
 public sealed record NotificationResponse(Guid Id, string Type, string Title, string Message, bool Read, DateTimeOffset CreatedAt);

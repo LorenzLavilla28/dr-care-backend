@@ -4,3 +4,6 @@
 .git/
 *.user
 *.suo
+.env
+.env.*
+**/local-storage/

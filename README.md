@@ -31,6 +31,8 @@ State-changing workflow operations use explicit action routes. There is intentio
 
 ## Local run
 
+For the complete macOS setup with Colima, email configuration, health checks, and troubleshooting, see [../docs/MAC_COLIMA_RUN_GUIDE.md](../docs/MAC_COLIMA_RUN_GUIDE.md).
+
 1. Copy `.env.example` to `.env` and replace every placeholder.
 2. Start PostgreSQL and the API with `docker compose up --build`.
 3. Local development seeds the named test accounts below using `DEVELOPMENT_ADMIN_PASSWORD`.
@@ -49,6 +51,8 @@ All seeded accounts use the configured development password.
 The compose file is for local development. Production should run with `ASPNETCORE_ENVIRONMENT=Production`, secrets injected by the deployment platform, private PostgreSQL access, TLS at the edge, and migrations applied as an explicit release step.
 
 Development uses `Storage__Provider=Local`. Generated PDFs and browser uploads receive short-lived signed URLs just like the S3 flow, while file bytes are stored under `Storage:Local:RootPath` (or the Docker `local_storage` volume). A placeholder S3 bucket name does not override the explicit local provider. When AWS is ready, set `Storage__Provider=S3`, configure `Storage__S3__BucketName`, region, and AWS credentials. Production rejects the local provider and requires an S3 bucket.
+
+Email is disabled in the tracked Development settings. To test Microsoft Graph locally, copy `src/DrCare.Api/appsettings.Development.local.example.json` to `appsettings.Development.local.json` and add the tenant, client, secret, and sender values. The local override is ignored by Git and loaded automatically in Development.
 
 To apply the schema during a release, run `dotnet ef database update --project src/DrCare.Infrastructure --startup-project src/DrCare.Api` with the production connection string supplied through environment configuration.
 

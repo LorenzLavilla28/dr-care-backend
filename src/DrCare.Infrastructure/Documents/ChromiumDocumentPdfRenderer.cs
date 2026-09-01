@@ -3,6 +3,7 @@ using System.Text;
 using DrCare.Application;
 using Microsoft.Extensions.Options;
 using PdfSharp.Drawing;
+using PdfSharp.Pdf;
 using PdfSharp.Pdf.IO;
 
 namespace DrCare.Infrastructure.Documents;
@@ -51,6 +52,38 @@ public sealed class ChromiumDocumentPdfRenderer(IOptions<DocumentRenderingOption
         }
     }
 
+    public async Task<byte[]> RenderPdfTemplateAsync(
+        Stream templatePdf,
+        string overlayHtml,
+        CancellationToken cancellationToken)
+    {
+        var overlayBytes = await RenderHtmlAsync(overlayHtml, cancellationToken);
+        using var templateBuffer = new MemoryStream();
+        await templatePdf.CopyToAsync(templateBuffer, cancellationToken);
+        templateBuffer.Position = 0;
+        using var document = PdfReader.Open(templateBuffer, PdfDocumentOpenMode.Modify);
+        using var overlayBuffer = new MemoryStream(overlayBytes, writable: false);
+        using var overlay = XPdfForm.FromStream(overlayBuffer);
+        if (document.PageCount != 10 || overlay.PageCount != document.PageCount)
+            throw new InvalidOperationException("The ABC agreement template must render as exactly ten pages.");
+
+        for (var index = 0; index < document.PageCount; index++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            overlay.PageNumber = index + 1;
+            var page = document.Pages[index];
+            using var graphics = XGraphics.FromPdfPage(page, XGraphicsPdfPageOptions.Append);
+            graphics.DrawImage(overlay, 0, 0, page.Width.Point, page.Height.Point);
+        }
+
+        using var output = new MemoryStream();
+        document.Save(output, closeStream: false);
+        var bytes = output.ToArray();
+        if (bytes.Length < 10_000 || bytes.Length > settings.MaxDocumentBytes || !bytes.AsSpan().StartsWith("%PDF"u8))
+            throw new InvalidOperationException("The generated agreement PDF is invalid.");
+        return bytes;
+    }
+
     public async Task<byte[]> StampSignatureAsync(Stream pdf, ReadOnlyMemory<byte> signaturePng, string signerRole, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
@@ -59,13 +92,14 @@ public sealed class ChromiumDocumentPdfRenderer(IOptions<DocumentRenderingOption
         if (document.PageCount == 0) throw new InvalidOperationException("The contract PDF has no pages.");
         using var signatureStream = new MemoryStream(signaturePng.ToArray(), writable: false);
         using var image = XImage.FromStream(signatureStream);
-        var page = document.Pages[^1];
+        if (document.PageCount < 9) throw new InvalidOperationException("The ABC contract signature page is missing.");
+        var page = document.Pages[8];
         using var graphics = XGraphics.FromPdfPage(page, XGraphicsPdfPageOptions.Append);
         var isFranchisee = signerRole.Equals("franchisee", StringComparison.OrdinalIgnoreCase);
-        var x = isFranchisee ? page.Width.Point * .10 : page.Width.Point * .55;
-        var y = page.Height.Point * .78;
-        var width = page.Width.Point * .34;
-        var height = 58d;
+        const double x = 306.5;
+        var y = isFranchisee ? 344d : 402.5d;
+        const double width = 145d;
+        const double height = 31d;
         var ratio = image.PixelWidth / (double)image.PixelHeight;
         var drawWidth = width; var drawHeight = drawWidth / ratio;
         if (drawHeight > height) { drawHeight = height; drawWidth = drawHeight * ratio; }

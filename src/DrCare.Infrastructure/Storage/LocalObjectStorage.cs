@@ -15,7 +15,7 @@ public sealed class LocalStorageOptions
 
 public interface ILocalObjectStorage : IPrivateObjectStorage
 {
-    bool TryValidate(string method, string encodedKey, string? contentType, string expires, string signature, out string objectKey, out string validatedContentType);
+    bool TryValidate(string method, string encodedKey, string? contentType, string? fileName, string expires, string signature, out string objectKey, out string validatedContentType, out string validatedFileName);
 }
 
 public sealed class LocalObjectStorage(IOptions<LocalStorageOptions> options) : ILocalObjectStorage
@@ -26,8 +26,8 @@ public sealed class LocalObjectStorage(IOptions<LocalStorageOptions> options) : 
     public Task<string> CreateUploadUrlAsync(string objectKey, string contentType, DateTimeOffset expiresAt, CancellationToken cancellationToken) =>
         Task.FromResult(CreateUrl("PUT", objectKey, contentType, expiresAt));
 
-    public Task<string> CreateDownloadUrlAsync(string objectKey, DateTimeOffset expiresAt, CancellationToken cancellationToken) =>
-        Task.FromResult(CreateUrl("GET", objectKey, string.Empty, expiresAt));
+    public Task<string> CreateDownloadUrlAsync(string objectKey, string fileName, string contentType, DateTimeOffset expiresAt, CancellationToken cancellationToken) =>
+        Task.FromResult(CreateUrl("GET", objectKey, contentType, expiresAt, fileName));
 
     public Task<bool> ExistsAsync(string objectKey, CancellationToken cancellationToken) =>
         Task.FromResult(File.Exists(GetSafePath(objectKey)));
@@ -49,36 +49,40 @@ public sealed class LocalObjectStorage(IOptions<LocalStorageOptions> options) : 
         return Task.FromResult<Stream>(new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 64 * 1024, useAsync: true));
     }
 
-    public bool TryValidate(string method, string encodedKey, string? contentType, string expires, string signature, out string objectKey, out string validatedContentType)
+    public bool TryValidate(string method, string encodedKey, string? contentType, string? fileName, string expires, string signature, out string objectKey, out string validatedContentType, out string validatedFileName)
     {
         objectKey = string.Empty;
         validatedContentType = string.Empty;
+        validatedFileName = string.Empty;
         if (!long.TryParse(expires, out var unix) || unix < DateTimeOffset.UtcNow.ToUnixTimeSeconds()) return false;
         try
         {
             var bytes = Base64UrlDecode(encodedKey);
             objectKey = Encoding.UTF8.GetString(bytes);
             validatedContentType = contentType is null ? string.Empty : Encoding.UTF8.GetString(Base64UrlDecode(contentType));
+            validatedFileName = fileName is null ? string.Empty : Encoding.UTF8.GetString(Base64UrlDecode(fileName));
         }
         catch (FormatException) { return false; }
         if (!IsSafeObjectKey(objectKey) || (method.Equals("PUT", StringComparison.OrdinalIgnoreCase) && string.IsNullOrWhiteSpace(validatedContentType))) return false;
-        var expected = Sign(method.ToUpperInvariant(), objectKey, validatedContentType, unix);
+        if (!string.IsNullOrEmpty(validatedFileName) && (validatedFileName != Path.GetFileName(validatedFileName) || validatedFileName.Length > 200 || validatedFileName.Contains('\r') || validatedFileName.Contains('\n'))) return false;
+        var expected = Sign(method.ToUpperInvariant(), objectKey, validatedContentType, unix, validatedFileName);
         return CryptographicOperations.FixedTimeEquals(Encoding.UTF8.GetBytes(expected), Encoding.UTF8.GetBytes(signature));
     }
 
     public static long MaxUploadBytes => MaxObjectBytes;
 
-    private string CreateUrl(string method, string objectKey, string contentType, DateTimeOffset expiresAt)
+    private string CreateUrl(string method, string objectKey, string contentType, DateTimeOffset expiresAt, string fileName = "")
     {
         var unix = expiresAt.ToUnixTimeSeconds();
         var encodedKey = Base64Url(Encoding.UTF8.GetBytes(objectKey));
         var encodedContentType = Base64Url(Encoding.UTF8.GetBytes(contentType));
-        var signature = Sign(method, objectKey, contentType, unix);
-        return $"{settings.BaseUrl.TrimEnd('/')}/api/v1/local-storage/{(method == "PUT" ? "upload" : "download")}?key={Uri.EscapeDataString(encodedKey)}&contentType={Uri.EscapeDataString(encodedContentType)}&expires={unix}&sig={Uri.EscapeDataString(signature)}";
+        var encodedFileName = Base64Url(Encoding.UTF8.GetBytes(fileName));
+        var signature = Sign(method, objectKey, contentType, unix, fileName);
+        return $"{settings.BaseUrl.TrimEnd('/')}/api/v1/local-storage/{(method == "PUT" ? "upload" : "download")}?key={Uri.EscapeDataString(encodedKey)}&contentType={Uri.EscapeDataString(encodedContentType)}&fileName={Uri.EscapeDataString(encodedFileName)}&expires={unix}&sig={Uri.EscapeDataString(signature)}";
     }
 
-    private string Sign(string method, string objectKey, string contentType, long expires) =>
-        Convert.ToHexString(HMACSHA256.HashData(Encoding.UTF8.GetBytes(settings.Secret), Encoding.UTF8.GetBytes($"{method}\n{objectKey}\n{contentType}\n{expires}"))).ToLowerInvariant();
+    private string Sign(string method, string objectKey, string contentType, long expires, string fileName = "") =>
+        Convert.ToHexString(HMACSHA256.HashData(Encoding.UTF8.GetBytes(settings.Secret), Encoding.UTF8.GetBytes($"{method}\n{objectKey}\n{contentType}\n{fileName}\n{expires}"))).ToLowerInvariant();
 
     private string GetSafePath(string objectKey)
     {

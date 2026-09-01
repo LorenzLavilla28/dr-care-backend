@@ -25,6 +25,9 @@ services:
       ConnectionStrings__DefaultConnection: Host=postgres;Port=5432;Database=${POSTGRES_DB:-drcare};Username=${POSTGRES_USER:-drcare};Password=${POSTGRES_PASSWORD}
       Jwt__SigningKey: ${JWT_SIGNING_KEY:?Set JWT_SIGNING_KEY in .env}
       DevelopmentAdminPassword: ${DEVELOPMENT_ADMIN_PASSWORD:?Set DEVELOPMENT_ADMIN_PASSWORD in .env}
+      # Keep local storage explicit in the development profile. The email worker
+      # and Microsoft Graph credentials are loaded from appsettings.Development.json.
+      Storage__Provider: ${STORAGE__PROVIDER:-Local}
       Storage__Local__BaseUrl: http://localhost:8080
       Storage__Local__RootPath: /tmp/dr-care-storage
       Storage__Local__Secret: ${LOCAL_STORAGE_SECRET:-local-development-storage-secret-change-me}

@@ -18,6 +18,7 @@ public interface ILeadRepository
     Task<(IReadOnlyList<Lead> Items, int Total)> SearchAsync(Guid organizationId, Guid? assignedAgentId, LeadState? state, ProductLine? productLine, DateTimeOffset? createdFrom, DateTimeOffset? createdTo, string? search, int skip, int take, string sort, CancellationToken cancellationToken);
     Task AddAsync(Lead lead, CancellationToken cancellationToken);
     Task AddActivityAsync(ActivityLog activity, CancellationToken cancellationToken);
+    Task<(IReadOnlyList<ActivityLog> Items, int Total)> ListActivitiesAsync(Guid organizationId, Guid leadId, int skip, int take, CancellationToken cancellationToken);
     Task AddTaskAsync(FollowUpTask task, CancellationToken cancellationToken);
     Task AddLocationAnalysisAsync(LocationAnalysis analysis, CancellationToken cancellationToken);
     Task<int> SaveChangesAsync(CancellationToken cancellationToken);
@@ -28,6 +29,8 @@ public interface ITaskRepository
     Task<FollowUpTask?> GetAsync(Guid organizationId, Guid taskId, CancellationToken cancellationToken);
     Task<FollowUpTask?> FindOpenByLeadAndTitleAsync(Guid organizationId, Guid leadId, string title, CancellationToken cancellationToken);
     Task<IReadOnlyList<FollowUpTask>> ListAsync(Guid organizationId, Guid? assignedTo, Guid? leadId, CancellationToken cancellationToken);
+    Task<IReadOnlyList<FollowUpTask>> ListCompletedAsync(Guid organizationId, Guid assignedTo, CancellationToken cancellationToken);
+    Task<(IReadOnlyList<FollowUpTask> Items, int Total)> ListCompletedPageAsync(Guid organizationId, Guid assignedTo, int skip, int take, CancellationToken cancellationToken);
     Task AddAsync(FollowUpTask task, CancellationToken cancellationToken);
     Task<int> SaveChangesAsync(CancellationToken cancellationToken);
 }
@@ -99,17 +102,23 @@ public interface ISettingsRepository
 public interface IReportingRepository
 {
     Task<IReadOnlyList<Lead>> ListLeadsAsync(Guid organizationId, Guid? assignedAgentId, DateTimeOffset? from, DateTimeOffset? to, CancellationToken cancellationToken);
+    Task<IReadOnlyList<Lead>> ListLeadsByIdsAsync(Guid organizationId, IReadOnlyCollection<Guid> leadIds, CancellationToken cancellationToken);
     Task<IReadOnlyList<DownPayment>> ListPaymentsAsync(Guid organizationId, DateTimeOffset? from, DateTimeOffset? to, CancellationToken cancellationToken);
+    Task<DownPayment?> GetPaymentAsync(Guid organizationId, Guid paymentId, CancellationToken cancellationToken);
+    Task<(IReadOnlyList<DownPayment> Items, int Total)> ListFinancePaymentsPageAsync(Guid organizationId, string view, string status, string? search, Guid? ownerId, DateTimeOffset? from, DateTimeOffset? to, int skip, int take, CancellationToken cancellationToken);
     Task<IReadOnlyList<Endorsement>> ListEndorsementsAsync(Guid organizationId, CancellationToken cancellationToken);
     Task<IReadOnlyList<Contract>> ListContractsAsync(Guid organizationId, CancellationToken cancellationToken);
     Task<IReadOnlyList<ActivityLog>> ListActivitiesAsync(Guid organizationId, CancellationToken cancellationToken);
+    Task<IReadOnlyList<ActivityLog>> ListActivitiesForActorAsync(Guid organizationId, Guid actorId, CancellationToken cancellationToken);
+    Task<(IReadOnlyList<ActivityLog> Items, int Total)> ListActivitiesPageAsync(Guid organizationId, Guid? leadId, int skip, int take, CancellationToken cancellationToken);
+    Task<(IReadOnlyList<ActivityLog> Items, int Total)> ListActivitiesForActorPageAsync(Guid organizationId, Guid actorId, IReadOnlyCollection<ActivityType> types, int skip, int take, CancellationToken cancellationToken);
     Task<IReadOnlyList<User>> ListUsersAsync(Guid organizationId, CancellationToken cancellationToken);
 }
 
 public interface IPrivateObjectStorage
 {
     Task<string> CreateUploadUrlAsync(string objectKey, string contentType, DateTimeOffset expiresAt, CancellationToken cancellationToken);
-    Task<string> CreateDownloadUrlAsync(string objectKey, DateTimeOffset expiresAt, CancellationToken cancellationToken);
+    Task<string> CreateDownloadUrlAsync(string objectKey, string fileName, string contentType, DateTimeOffset expiresAt, CancellationToken cancellationToken);
     Task<bool> ExistsAsync(string objectKey, CancellationToken cancellationToken);
     Task PutAsync(string objectKey, string contentType, ReadOnlyMemory<byte> content, CancellationToken cancellationToken);
     Task<Stream> OpenReadAsync(string objectKey, CancellationToken cancellationToken);
@@ -118,7 +127,57 @@ public interface IPrivateObjectStorage
 public interface IDocumentPdfRenderer
 {
     Task<byte[]> RenderHtmlAsync(string html, CancellationToken cancellationToken);
+    Task<byte[]> RenderPdfTemplateAsync(Stream templatePdf, string overlayHtml, CancellationToken cancellationToken);
     Task<byte[]> StampSignatureAsync(Stream pdf, ReadOnlyMemory<byte> signaturePng, string signerRole, CancellationToken cancellationToken);
+}
+
+public sealed record QueuedEmailAttachment(string FileName, string ContentType, string ObjectKey);
+
+public sealed record QueueEmailRequest(
+    Guid OrganizationId,
+    string RecipientEmail,
+    string? RecipientName,
+    string Subject,
+    string HtmlBody,
+    string? TextBody = null,
+    string Category = "transactional",
+    IReadOnlyList<QueuedEmailAttachment>? Attachments = null,
+    string? IdempotencyKey = null,
+    DateTimeOffset? NotBefore = null);
+
+public interface IEmailQueue
+{
+    Task<Guid> EnqueueAsync(QueueEmailRequest request, CancellationToken cancellationToken);
+    Task<IReadOnlyList<Guid>> EnqueueManyAsync(IReadOnlyList<QueueEmailRequest> requests, CancellationToken cancellationToken);
+    Task CancelAsync(Guid messageId, CancellationToken cancellationToken);
+    Task<QueuedEmailState?> FindAsync(Guid organizationId, string idempotencyKey, CancellationToken cancellationToken);
+}
+
+public sealed record QueuedEmailState(EmailDeliveryStatus Status, DateTimeOffset QueuedAt, DateTimeOffset? SentAt);
+
+public sealed record BrandedEmailRequest(
+    ProductLine? ProductLine,
+    string Preheader,
+    string Title,
+    string Greeting,
+    IReadOnlyList<string> Paragraphs,
+    string? ActionLabel = null,
+    string? ActionUrl = null,
+    IReadOnlyList<KeyValuePair<string, string>>? Details = null,
+    string? ClosingNote = null);
+
+public sealed record ComposedEmail(string Html, string Text);
+
+public interface IEmailComposer
+{
+    ComposedEmail Compose(BrandedEmailRequest request);
+}
+
+public interface IApplicationLinks
+{
+    string Login();
+    string PasswordReset(string token, string email);
+    string ContractSigning(string token);
 }
 
 public interface IPasswordService

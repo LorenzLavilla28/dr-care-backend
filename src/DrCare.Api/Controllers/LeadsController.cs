@@ -46,12 +46,12 @@ public sealed class LeadsController(ILeadService leadService, ITaskService taskS
         Ok(await leadService.SubmitInquiryAsync(leadId, cancellationToken));
 
     [HttpGet("{leadId:guid}/activities")]
-    public async Task<ActionResult<IReadOnlyList<ActivityResponse>>> GetActivities(Guid leadId, CancellationToken cancellationToken) =>
-        Ok(await leadService.GetActivitiesAsync(leadId, cancellationToken));
+    public async Task<ActionResult<PagedResponse<ActivityResponse>>> GetActivities(Guid leadId, [FromQuery] int page = 1, CancellationToken cancellationToken = default) =>
+        Ok(await leadService.GetActivitiesAsync(leadId, page, cancellationToken));
 
     [HttpGet("{leadId:guid}/activity")]
-    public async Task<ActionResult<IReadOnlyList<ActivityResponse>>> GetActivityAlias(Guid leadId, CancellationToken cancellationToken) =>
-        Ok(await leadService.GetActivitiesAsync(leadId, cancellationToken));
+    public async Task<ActionResult<PagedResponse<ActivityResponse>>> GetActivityAlias(Guid leadId, [FromQuery] int page = 1, CancellationToken cancellationToken = default) =>
+        Ok(await leadService.GetActivitiesAsync(leadId, page, cancellationToken));
 
     [HttpGet("{leadId:guid}/inquiry")]
     public async Task<ActionResult<LeadDetails>> GetInquiry(Guid leadId, CancellationToken cancellationToken) => Ok(await leadService.GetInquiryAsync(leadId, cancellationToken));
@@ -79,6 +79,9 @@ public sealed class LeadsController(ILeadService leadService, ITaskService taskS
 
     [HttpPut("{leadId:guid}/location-analysis")]
     public async Task<ActionResult<LocationAnalysisResponse>> UpdateLocationAnalysis(Guid leadId, UpdateLocationAnalysisRequest request, CancellationToken cancellationToken) => Ok(await leadService.UpdateLocationAnalysisAsync(leadId, request, cancellationToken));
+
+    [HttpPost("{leadId:guid}/location-analysis/submit")]
+    public async Task<ActionResult<LocationAnalysisResponse>> SubmitLocationAnalysis(Guid leadId, SubmitLocationAnalysisRequest request, CancellationToken cancellationToken) => Ok(await leadService.SubmitLocationAnalysisAsync(leadId, request, cancellationToken));
 
     [HttpPost("{leadId:guid}/location-analysis/evaluate")]
     public async Task<ActionResult<LocationEvaluationResponse>> EvaluateLocationAnalysis(Guid leadId, LocationEvaluationRequest request, CancellationToken cancellationToken) => Ok(await leadService.EvaluateLocationAnalysisAsync(leadId, request, cancellationToken));

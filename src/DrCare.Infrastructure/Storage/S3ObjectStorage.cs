@@ -22,10 +22,11 @@ public sealed class S3ObjectStorage(IAmazonS3 client, IOptions<S3Options> option
         return Task.FromResult(client.GetPreSignedURL(request));
     }
 
-    public Task<string> CreateDownloadUrlAsync(string objectKey, DateTimeOffset expiresAt, CancellationToken cancellationToken)
+    public Task<string> CreateDownloadUrlAsync(string objectKey, string fileName, string contentType, DateTimeOffset expiresAt, CancellationToken cancellationToken)
     {
         EnsureConfigured();
-        var request = new GetPreSignedUrlRequest { BucketName = options.Value.BucketName, Key = objectKey, Verb = HttpVerb.GET, Expires = expiresAt.UtcDateTime };
+        var request = new GetPreSignedUrlRequest { BucketName = options.Value.BucketName, Key = objectKey, Verb = HttpVerb.GET, Expires = expiresAt.UtcDateTime,
+            ResponseHeaderOverrides = new ResponseHeaderOverrides { ContentType = contentType, ContentDisposition = $"attachment; filename=\"{fileName.Replace("\"", string.Empty)}\"" } };
         return Task.FromResult(client.GetPreSignedURL(request));
     }
 

@@ -126,11 +126,10 @@ public sealed class Lead
         Touch();
     }
 
-    public void RecordCallOutcome(string outcome, string welcomeEmailReceived, string goodTimeToDiscuss, string? notes)
+    public void RecordCallOutcome(string outcome, string goodTimeToDiscuss, string? notes)
     {
         EnsureState(LeadState.Nurturing, LeadState.FollowUp);
         LastCallOutcome = outcome.Trim();
-        WelcomeEmailReceived = welcomeEmailReceived.Trim();
         GoodTimeToDiscuss = goodTimeToDiscuss.Trim();
         NurturingNotes = notes?.Trim();
         LastContactedAt = DateTimeOffset.UtcNow;
@@ -194,7 +193,9 @@ public sealed class LocationAnalysis
         LeadId = leadId;
         OrganizationId = organizationId;
         PreferredLocation = location;
-        Status = "PENDING";
+        Status = "Draft";
+        LeaseOwnershipStatus = "";
+        AssessmentJson = "[]";
         CreatedAt = UpdatedAt = DateTimeOffset.UtcNow;
     }
 
@@ -202,26 +203,64 @@ public sealed class LocationAnalysis
     public Guid LeadId { get; private set; }
     public Guid OrganizationId { get; private set; }
     public string PreferredLocation { get; private set; } = string.Empty;
-    public string Status { get; private set; } = "PENDING";
+    public string Status { get; private set; } = "Draft";
+    public string LeaseOwnershipStatus { get; private set; } = string.Empty;
+    public string AssessmentJson { get; private set; } = "[]";
     public string? Notes { get; private set; }
+    public string? ReviewNotes { get; private set; }
     public DateTimeOffset? EvaluatedAt { get; private set; }
     public Guid? EvaluatedBy { get; private set; }
+    public DateTimeOffset? SubmittedAt { get; private set; }
+    public Guid? SubmittedBy { get; private set; }
+    public string? RevisionReason { get; private set; }
     public DateTimeOffset CreatedAt { get; private set; }
     public DateTimeOffset UpdatedAt { get; private set; }
 
     public void Update(string preferredLocation, string? notes)
     {
+        UpdateAssessment(preferredLocation, LeaseOwnershipStatus, notes, AssessmentJson);
+    }
+
+    public void UpdateAssessment(string preferredLocation, string? leaseOwnershipStatus, string? notes, string assessmentJson)
+    {
+        if (Status is "Submitted" or "Approved" or "Passed")
+            throw new DomainRuleException("A submitted or approved location analysis cannot be edited.");
         PreferredLocation = preferredLocation.Trim();
+        LeaseOwnershipStatus = leaseOwnershipStatus?.Trim() ?? string.Empty;
         Notes = notes?.Trim();
+        AssessmentJson = string.IsNullOrWhiteSpace(assessmentJson) ? "[]" : assessmentJson;
+        if (Status is "Returned" or "Failed") Status = "Draft";
         UpdatedAt = DateTimeOffset.UtcNow;
+    }
+
+    public void Submit(Guid submitterId)
+    {
+        if (Status is "Approved" or "Passed")
+            throw new DomainRuleException("An approved location analysis cannot be resubmitted.");
+        if (Status is "Submitted")
+            throw new DomainRuleException("This location analysis is already submitted for review.");
+        Status = "Submitted";
+        SubmittedBy = submitterId;
+        SubmittedAt = UpdatedAt = DateTimeOffset.UtcNow;
+        ReviewNotes = null;
+        RevisionReason = null;
     }
 
     public void Evaluate(string decision, string? notes, Guid evaluatorId)
     {
-        if (decision is not ("Pending" or "Passed" or "Failed"))
-            throw new DomainRuleException("Location decision must be Pending, Passed, or Failed.");
-        Status = decision;
-        Notes = notes?.Trim();
+        if (Status is not "Submitted")
+            throw new DomainRuleException("Location analysis must be submitted before review.");
+        var normalized = decision.Trim();
+        if (normalized is not ("Pending" or "Passed" or "Failed" or "Approved" or "Returned"))
+            throw new DomainRuleException("Location decision must be Pending, Passed, Failed, Approved, or Returned.");
+        Status = normalized switch
+        {
+            "Passed" or "Approved" => "Approved",
+            "Failed" or "Returned" => "Returned",
+            _ => "Draft",
+        };
+        ReviewNotes = notes?.Trim();
+        RevisionReason = Status == "Returned" ? ReviewNotes : null;
         EvaluatedBy = evaluatorId;
         EvaluatedAt = UpdatedAt = DateTimeOffset.UtcNow;
     }
@@ -506,6 +545,10 @@ public sealed class Contract
     public bool GmApproved { get; private set; }
     public DateTimeOffset? GmApprovedAt { get; private set; }
     public Guid? GmApprovedBy { get; private set; }
+    public string? RevisionReason { get; private set; }
+    public DateTimeOffset? RevisionRequestedAt { get; private set; }
+    public Guid? RevisionRequestedBy { get; private set; }
+    public string? RevisionRequestedByName { get; private set; }
     public DateTimeOffset? SignedAt { get; private set; }
     public string? FranchiseeSignerName { get; private set; }
     public DateTimeOffset? FranchiseeSignedAt { get; private set; }
@@ -520,7 +563,16 @@ public sealed class Contract
     public DateTimeOffset UpdatedAt { get; private set; }
 
     public void SubmitReview() { Status = ContractStatus.InReview; Touch(); }
-    public void RequestRevision() { Status = ContractStatus.RevisionRequested; Touch(); }
+    public void RequestRevision(string reason, Guid actorId, string? actorName = null)
+    {
+        if (string.IsNullOrWhiteSpace(reason)) throw new DomainRuleException("A revision reason is required.");
+        RevisionReason = reason.Trim();
+        RevisionRequestedAt = DateTimeOffset.UtcNow;
+        RevisionRequestedBy = actorId;
+        RevisionRequestedByName = string.IsNullOrWhiteSpace(actorName) ? null : actorName.Trim();
+        Status = ContractStatus.RevisionRequested;
+        Touch();
+    }
     public void Approve(Guid actorId) { GmApproved = true; GmApprovedBy = actorId; GmApprovedAt = DateTimeOffset.UtcNow; Status = ContractStatus.Approved; Touch(); }
     public void AddSignature(string signerRole, string signerName, string signatureHash, DateTimeOffset signedAt)
     {
@@ -642,6 +694,9 @@ public sealed class PreLaunchChecklist
     public string Status { get; private set; } = string.Empty;
     public DateTimeOffset CreatedAt { get; private set; }
     public DateTimeOffset UpdatedAt { get; private set; }
+    public Guid? VideoEmailId { get; private set; }
+    public string? VideoUrl { get; private set; }
+    public DateTimeOffset? VideoQueuedAt { get; private set; }
     public IReadOnlyCollection<PreLaunchItem> Items => _items;
     public void AddItem(PreLaunchItem item) => _items.Add(item);
     public void Touch()
@@ -655,6 +710,10 @@ public sealed class PreLaunchChecklist
             throw new DomainRuleException("All required pre-launch items must be complete.");
         Status = "COMPLETED";
         UpdatedAt = DateTimeOffset.UtcNow;
+    }
+    public void RecordVideoEmail(Guid emailId, string videoUrl)
+    {
+        VideoEmailId = emailId; VideoUrl = videoUrl; VideoQueuedAt = UpdatedAt = DateTimeOffset.UtcNow;
     }
 }
 
@@ -706,6 +765,9 @@ public sealed class ContractSigningRequest
     public long? SignedDocumentSizeBytes { get; private set; }
     public string? IpAddress { get; private set; }
     public string? UserAgent { get; private set; }
+    public Guid? InvitationEmailId { get; private set; }
+    public Guid? ReminderEmailId { get; private set; }
+    public void SetEmailDelivery(Guid invitationEmailId, Guid reminderEmailId) { InvitationEmailId = invitationEmailId; ReminderEmailId = reminderEmailId; UpdatedAt = DateTimeOffset.UtcNow; }
     public void View() { if (Status == SigningRequestStatus.Pending) Status = SigningRequestStatus.Viewed; ViewedAt ??= DateTimeOffset.UtcNow; UpdatedAt = DateTimeOffset.UtcNow; }
     public void Sign(string signatureSha256, string documentSha256, long documentSizeBytes, string? ipAddress, string? userAgent)
     {
@@ -760,6 +822,112 @@ public sealed class AppSetting
     public string ValueJson { get; private set; } = "{}";
     public DateTimeOffset UpdatedAt { get; private set; }
     public void Update(string valueJson) { ValueJson = valueJson; UpdatedAt = DateTimeOffset.UtcNow; }
+}
+
+public sealed class EmailOutboxMessage
+{
+    private EmailOutboxMessage() { }
+
+    public EmailOutboxMessage(
+        Guid organizationId,
+        string recipientEmail,
+        string? recipientName,
+        string subject,
+        string htmlBody,
+        string? textBody,
+        string category,
+        string attachmentsJson,
+        string? idempotencyKey,
+        int maxAttempts,
+        DateTimeOffset? availableAt = null)
+    {
+        if (organizationId == Guid.Empty) throw new DomainRuleException("An organization is required for queued email.");
+        if (!System.Net.Mail.MailAddress.TryCreate(recipientEmail?.Trim(), out var parsedAddress)) throw new DomainRuleException("A valid recipient email address is required.");
+        if (string.IsNullOrWhiteSpace(subject)) throw new DomainRuleException("An email subject is required.");
+        if (subject.Contains('\r') || subject.Contains('\n')) throw new DomainRuleException("The email subject contains invalid characters.");
+        if (string.IsNullOrWhiteSpace(htmlBody)) throw new DomainRuleException("An HTML email body is required.");
+        if (maxAttempts < 1) throw new DomainRuleException("Email delivery must allow at least one attempt.");
+
+        Id = Guid.NewGuid();
+        OrganizationId = organizationId;
+        RecipientEmail = parsedAddress.Address.ToLowerInvariant();
+        RecipientName = recipientName?.Trim();
+        Subject = subject.Trim();
+        HtmlBody = htmlBody;
+        TextBody = string.IsNullOrWhiteSpace(textBody) ? null : textBody;
+        Category = string.IsNullOrWhiteSpace(category) ? "transactional" : category.Trim();
+        AttachmentsJson = string.IsNullOrWhiteSpace(attachmentsJson) ? "[]" : attachmentsJson;
+        IdempotencyKey = string.IsNullOrWhiteSpace(idempotencyKey) ? null : idempotencyKey.Trim();
+        Status = EmailDeliveryStatus.Pending;
+        MaxAttempts = maxAttempts;
+        CreatedAt = UpdatedAt = DateTimeOffset.UtcNow;
+        AvailableAt = availableAt ?? CreatedAt;
+    }
+
+    public Guid Id { get; private set; }
+    public Guid OrganizationId { get; private set; }
+    public string RecipientEmail { get; private set; } = string.Empty;
+    public string? RecipientName { get; private set; }
+    public string Subject { get; private set; } = string.Empty;
+    public string HtmlBody { get; private set; } = string.Empty;
+    public string? TextBody { get; private set; }
+    public string Category { get; private set; } = string.Empty;
+    public string AttachmentsJson { get; private set; } = "[]";
+    public string? IdempotencyKey { get; private set; }
+    public EmailDeliveryStatus Status { get; private set; }
+    public int AttemptCount { get; private set; }
+    public int MaxAttempts { get; private set; }
+    public DateTimeOffset AvailableAt { get; private set; }
+
+    public void Cancel()
+    {
+        if (Status is EmailDeliveryStatus.Pending or EmailDeliveryStatus.Failed)
+        {
+            Status = EmailDeliveryStatus.Cancelled;
+            UpdatedAt = DateTimeOffset.UtcNow;
+        }
+    }
+    public DateTimeOffset CreatedAt { get; private set; }
+    public DateTimeOffset UpdatedAt { get; private set; }
+    public DateTimeOffset? ProcessingStartedAt { get; private set; }
+    public DateTimeOffset? SentAt { get; private set; }
+    public string? LastError { get; private set; }
+
+    public void StartAttempt(DateTimeOffset now)
+    {
+        if (Status is not (EmailDeliveryStatus.Pending or EmailDeliveryStatus.Processing))
+            throw new DomainRuleException("Only pending email can begin delivery.");
+        Status = EmailDeliveryStatus.Processing;
+        AttemptCount++;
+        ProcessingStartedAt = now;
+        LastError = null;
+        UpdatedAt = now;
+    }
+
+    public void MarkSent(DateTimeOffset now)
+    {
+        if (Status != EmailDeliveryStatus.Processing) throw new DomainRuleException("Only processing email can be marked sent.");
+        Status = EmailDeliveryStatus.Sent;
+        SentAt = now;
+        ProcessingStartedAt = null;
+        LastError = null;
+        UpdatedAt = now;
+    }
+
+    public void RecordFailure(string error, DateTimeOffset now, DateTimeOffset retryAt)
+    {
+        if (Status != EmailDeliveryStatus.Processing) throw new DomainRuleException("Only processing email can record a delivery failure.");
+        LastError = string.IsNullOrWhiteSpace(error) ? "Email delivery failed." : error.Trim()[..Math.Min(error.Trim().Length, 2000)];
+        ProcessingStartedAt = null;
+        UpdatedAt = now;
+        if (AttemptCount >= MaxAttempts)
+        {
+            Status = EmailDeliveryStatus.Failed;
+            return;
+        }
+        Status = EmailDeliveryStatus.Pending;
+        AvailableAt = retryAt;
+    }
 }
 
 public sealed class DomainRuleException(string message) : Exception(message);

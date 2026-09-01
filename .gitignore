@@ -361,3 +361,9 @@ MigrationBackup/
 
 # Fody - auto-generated XML schema
 FodyWeavers.xsd
+
+# Runtime-only local object storage used by Development
+src/DrCare.Api/local-storage/
+
+# Development-only credentials and overrides
+src/DrCare.Api/appsettings.Development.local.json

@@ -22,6 +22,7 @@ public sealed class ApplicationDbContext(DbContextOptions<ApplicationDbContext> 
     public DbSet<PreLaunchChecklist> PreLaunchChecklists => Set<PreLaunchChecklist>();
     public DbSet<PreLaunchItem> PreLaunchItems => Set<PreLaunchItem>();
     public DbSet<AppSetting> AppSettings => Set<AppSetting>();
+    public DbSet<EmailOutboxMessage> EmailOutboxMessages => Set<EmailOutboxMessage>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -77,6 +78,8 @@ public sealed class ApplicationDbContext(DbContextOptions<ApplicationDbContext> 
             entity.Property(x => x.TemplateVersion).HasMaxLength(32).IsRequired();
             entity.Property(x => x.FranchiseeSignerName).HasMaxLength(160);
             entity.Property(x => x.DrCareSignerName).HasMaxLength(160);
+            entity.Property(x => x.RevisionReason).HasMaxLength(4000);
+            entity.Property(x => x.RevisionRequestedByName).HasMaxLength(160);
             entity.Property(x => x.ReviewChecklistJson).HasColumnType("jsonb").IsRequired();
             entity.Property(x => x.Status).HasConversion<string>().HasMaxLength(40);
             entity.Property(x => x.RenderedHtml).HasColumnType("text");
@@ -157,6 +160,22 @@ public sealed class ApplicationDbContext(DbContextOptions<ApplicationDbContext> 
             entity.Property(x => x.Key).HasMaxLength(120).IsRequired();
             entity.Property(x => x.ValueJson).HasColumnType("jsonb").IsRequired();
         });
+        modelBuilder.Entity<EmailOutboxMessage>(entity =>
+        {
+            entity.HasKey(x => x.Id);
+            entity.HasIndex(x => new { x.Status, x.AvailableAt, x.CreatedAt });
+            entity.HasIndex(x => new { x.OrganizationId, x.IdempotencyKey }).IsUnique();
+            entity.Property(x => x.RecipientEmail).HasMaxLength(254).IsRequired();
+            entity.Property(x => x.RecipientName).HasMaxLength(160);
+            entity.Property(x => x.Subject).HasMaxLength(300).IsRequired();
+            entity.Property(x => x.HtmlBody).HasColumnType("text").IsRequired();
+            entity.Property(x => x.TextBody).HasColumnType("text");
+            entity.Property(x => x.Category).HasMaxLength(80).IsRequired();
+            entity.Property(x => x.AttachmentsJson).HasColumnType("jsonb").IsRequired();
+            entity.Property(x => x.IdempotencyKey).HasMaxLength(200);
+            entity.Property(x => x.Status).HasConversion<string>().HasMaxLength(40);
+            entity.Property(x => x.LastError).HasMaxLength(2000);
+        });
 
         modelBuilder.Entity<Lead>(entity =>
         {
@@ -172,7 +191,7 @@ public sealed class ApplicationDbContext(DbContextOptions<ApplicationDbContext> 
             entity.Property(x => x.Industry).HasMaxLength(160);
             entity.Property(x => x.QuestionsConcerns).HasMaxLength(4000);
             entity.Property(x => x.WelcomeEmailReceived).HasMaxLength(20);
-            entity.Property(x => x.GoodTimeToDiscuss).HasMaxLength(20);
+            entity.Property(x => x.GoodTimeToDiscuss).HasMaxLength(40);
             entity.Property(x => x.LastCallOutcome).HasMaxLength(80);
             entity.Property(x => x.PreferredLocation).HasMaxLength(240);
             entity.Property(x => x.State).HasConversion<string>().HasMaxLength(40);
@@ -192,6 +211,11 @@ public sealed class ApplicationDbContext(DbContextOptions<ApplicationDbContext> 
             entity.HasIndex(x => x.LeadId).IsUnique();
             entity.Property(x => x.PreferredLocation).HasMaxLength(240).IsRequired();
             entity.Property(x => x.Status).HasMaxLength(40).IsRequired();
+            entity.Property(x => x.LeaseOwnershipStatus).HasMaxLength(40).IsRequired();
+            entity.Property(x => x.AssessmentJson).HasColumnType("jsonb").IsRequired();
+            entity.Property(x => x.Notes).HasMaxLength(2000);
+            entity.Property(x => x.ReviewNotes).HasMaxLength(2000);
+            entity.Property(x => x.RevisionReason).HasMaxLength(2000);
         });
 
         modelBuilder.Entity<ActivityLog>(entity =>

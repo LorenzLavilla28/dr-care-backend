@@ -119,7 +119,11 @@ public sealed class WorkflowService(IWorkflowRepository records, IProcessReposit
                 var contract = await processes.GetContractAsync(currentUser.OrganizationId, leadId.Value, ct) ?? throw new NotFoundException("Contract not found.");
                 if (operation == "contracts.submit-review") contract.SubmitReview();
                 else if (operation == "contracts.approve") contract.Approve(currentUser.UserId);
-                else if (operation == "contracts.request-revision") contract.RequestRevision();
+                else if (operation == "contracts.request-revision")
+                {
+                    var revision = Deserialize<RevisionRequest>(payload) ?? throw new ValidationException("A revision reason is required.");
+                    contract.RequestRevision(revision.Reason, currentUser.UserId, currentUser.DisplayName);
+                }
                 else
                 {
                     var signature = Deserialize<ContractSignatureRequest>(payload) ?? throw new ValidationException("Contract signature is required.");
@@ -153,7 +157,12 @@ public sealed class WorkflowService(IWorkflowRepository records, IProcessReposit
 
     private static void ValidateDocumentRequest(CreateUploadIntentRequest request)
     {
-        var allowed = new[] { "VALID_ID_SIGNATURES", "FLOOR_PLAN", "PERSPECTIVE", "SIGNED_CONTRACT", "PAYMENT_RECEIPT" };
+        var allowed = new[]
+        {
+            "VALID_ID_SIGNATURES", "FLOOR_PLAN", "PERSPECTIVE", "SIGNED_CONTRACT", "PAYMENT_RECEIPT",
+            "DOH_FLOOR_PLAN", "LEASE_AND_ADDRESS", "DTI_REGISTRATION", "SITE_PHOTOS", "PERMITS",
+            "BUSINESS_PLAN", "VALID_ID_TIN", "FRANCHISE_AGREEMENT", "TRAINING_APPLICATION", "PHARMACY_PERMITS"
+        };
         if (!allowed.Contains(request.DocumentType.ToUpperInvariant())) throw new ValidationException("Unsupported document type.");
         var allowedTypes = new[] { "application/pdf", "image/jpeg", "image/png" };
         if (!allowedTypes.Contains(request.ContentType.ToLowerInvariant())) throw new ValidationException("Unsupported document content type.");

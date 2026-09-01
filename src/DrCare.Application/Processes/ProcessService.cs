@@ -40,7 +40,7 @@ public interface IProcessService
     Task<NotificationResponse> MarkNotificationReadAsync(Guid notificationId, CancellationToken ct);
 }
 
-public sealed class ProcessService(IProcessRepository processes, ILeadRepository leads, IPrivateObjectStorage storage, IDocumentPdfRenderer pdfRenderer, ISettingsService settings, ICurrentUser currentUser, INotificationService notifications, IPreLaunchRepository checklists) : IProcessService
+public sealed class ProcessService(IProcessRepository processes, ILeadRepository leads, IPrivateObjectStorage storage, IDocumentPdfRenderer pdfRenderer, ISettingsService settings, ICurrentUser currentUser, INotificationService notifications, IPreLaunchRepository checklists, IEmailQueue emailQueue, IEmailComposer emailComposer) : IProcessService
 {
     public async Task<DownPaymentResponse> GetDownPaymentAsync(Guid leadId, CancellationToken ct)
     {
@@ -91,9 +91,14 @@ public sealed class ProcessService(IProcessRepository processes, ILeadRepository
         await storage.PutAsync(key, "application/pdf", pdf, ct);
         payment.IssueInvoice(invoiceNumber, key, Sha256(pdf), dueAt);
         await AddAuditAsync(lead, ActivityType.InvoiceGenerated, $"Down payment invoice {invoiceNumber} generated.", ct);
-        await processes.SaveChangesAsync(ct);
+        var invoiceEmail = emailComposer.Compose(new BrandedEmailRequest(lead.ProductLine, "Your Dr. Care invoice is ready.", "Down payment invoice", $"Hello {lead.FullName},",
+            ["Your down payment invoice has been prepared and is attached to this email.", "Please follow the agreed payment instructions before the due date."],
+            Details: [new("Invoice", invoiceNumber), new("Amount", $"{payment.Currency} {payment.Amount:N2}"), new("Due date", dueAt.ToString("MMMM d, yyyy"))]));
+        await emailQueue.EnqueueAsync(new QueueEmailRequest(lead.OrganizationId, lead.Email, lead.FullName, $"Dr. Care invoice {invoiceNumber}", invoiceEmail.Html, invoiceEmail.Text,
+            "invoice", [new QueuedEmailAttachment($"{invoiceNumber}.pdf", "application/pdf", key)], $"payment:{payment.Id}:invoice:{invoiceNumber}"), ct);
         var expires = DateTimeOffset.UtcNow.AddMinutes(5);
-        return new InvoiceResponse(lead.Id, payment.InvoiceNumber!, payment.Amount, payment.Currency, payment.Status.ToString(), payment.UpdatedAt, payment.InvoiceDueAt, await storage.CreateDownloadUrlAsync(key, expires, ct));
+        return new InvoiceResponse(lead.Id, payment.InvoiceNumber!, payment.Amount, payment.Currency, payment.Status.ToString(), payment.UpdatedAt, payment.InvoiceDueAt,
+            await storage.CreateDownloadUrlAsync(key, $"{invoiceNumber}.pdf", "application/pdf", expires, ct));
     }
 
     public async Task<DownPaymentResponse> SubmitDownPaymentForFinanceAsync(Guid leadId, SubmitDownPaymentRequest request, CancellationToken ct)
@@ -123,7 +128,8 @@ public sealed class ProcessService(IProcessRepository processes, ILeadRepository
         var payment = await processes.GetDownPaymentAsync(currentUser.OrganizationId, leadId, ct) ?? throw new NotFoundException("Invoice not found.");
         if (string.IsNullOrWhiteSpace(payment.InvoiceObjectKey)) throw new NotFoundException("Invoice artifact has not been generated.");
         var expires = DateTimeOffset.UtcNow.AddMinutes(5);
-        return new DocumentDownloadResponse(payment.Id, await storage.CreateDownloadUrlAsync(payment.InvoiceObjectKey, expires, ct), expires);
+        return new DocumentDownloadResponse(payment.Id,
+            await storage.CreateDownloadUrlAsync(payment.InvoiceObjectKey, $"{payment.InvoiceNumber ?? "Dr-Care-Down-Payment-Invoice"}.pdf", "application/pdf", expires, ct), expires);
     }
 
     public async Task<ConfirmDownPaymentResponse> ConfirmDownPaymentAsync(Guid leadId, ConfirmDownPaymentRequest request, CancellationToken ct)
@@ -141,7 +147,11 @@ public sealed class ProcessService(IProcessRepository processes, ILeadRepository
         await AddAuditAsync(lead, ActivityType.PaymentConfirmed, "Finance confirmed the down payment and required documents.", ct);
         await notifications.NotifyUserAsync(currentUser.OrganizationId, lead.AssignedAgentId, "down-payment-confirmed", "Down payment confirmed", $"Finance confirmed the down payment for {lead.FullName}. Contract drafting can begin.", ct);
         await notifications.NotifyRoleAsync(currentUser.OrganizationId, UserRole.MarketingAdmin, "down-payment-confirmed", "Down payment confirmed", $"Finance confirmed the down payment for {lead.FullName}. Contract drafting can begin.", ct);
-        await processes.SaveChangesAsync(ct);
+        var receipt = emailComposer.Compose(new BrandedEmailRequest(lead.ProductLine, "Your payment was confirmed.", "Down payment confirmed", $"Hello {lead.FullName},",
+            ["We have confirmed your down payment. Your franchise application will now proceed to contract drafting."],
+            Details: [new("Amount", $"{payment.Currency} {payment.Amount:N2}"), new("Reference", payment.ConfirmationReference ?? request.ReferenceNumber), new("Confirmed", payment.ConfirmedAt!.Value.ToString("MMMM d, yyyy"))]));
+        await emailQueue.EnqueueAsync(new QueueEmailRequest(lead.OrganizationId, lead.Email, lead.FullName, "Dr. Care payment confirmation", receipt.Html, receipt.Text,
+            "payment-confirmation", string.IsNullOrWhiteSpace(payment.InvoiceObjectKey) ? null : [new QueuedEmailAttachment($"{payment.InvoiceNumber}.pdf", "application/pdf", payment.InvoiceObjectKey)], $"payment:{payment.Id}:confirmed"), ct);
         return new ConfirmDownPaymentResponse(lead.Id, payment.Status.ToString(), payment.ConfirmedAt!.Value, payment.ConfirmationReference!);
     }
 
@@ -157,8 +167,9 @@ public sealed class ProcessService(IProcessRepository processes, ILeadRepository
         EnsureDocumentWrite(request.DocumentType);
         await GetLeadAsync(leadId, ct);
         ValidateDocumentRequest(request);
-        if (currentUser.Role == UserRole.MarketingAgent && request.DocumentType.Trim().ToUpperInvariant() != "VALID_ID_SIGNATURES")
-            throw new ForbiddenException("Marketing Agents can upload only the combined valid ID and specimen signatures file.");
+        var documentType = request.DocumentType.Trim().ToUpperInvariant();
+        if (currentUser.Role == UserRole.MarketingAgent && documentType != "VALID_ID_SIGNATURES" && !IsPreLaunchDocumentType(documentType))
+            throw new ForbiddenException("Marketing Agents can upload the combined valid ID/signatures file or a document required by the assigned pre-launch checklist.");
         var id = Guid.NewGuid();
         var expires = DateTimeOffset.UtcNow.AddMinutes(15);
         var key = $"private/{currentUser.OrganizationId:N}/leads/{leadId:N}/{id:N}";
@@ -196,7 +207,8 @@ public sealed class ProcessService(IProcessRepository processes, ILeadRepository
         var document = await processes.GetDocumentAsync(currentUser.OrganizationId, leadId, documentId, ct) ?? throw new NotFoundException("Document not found.");
         if (document.Status != DocumentStatus.Uploaded) throw new ConflictException("Only uploaded documents can be downloaded.");
         var expires = DateTimeOffset.UtcNow.AddMinutes(5);
-        return new DocumentDownloadResponse(document.Id, await storage.CreateDownloadUrlAsync(document.ObjectKey, expires, ct), expires);
+        return new DocumentDownloadResponse(document.Id,
+            await storage.CreateDownloadUrlAsync(document.ObjectKey, document.FileName, document.ContentType, expires, ct), expires);
     }
 
     public async Task<DocumentResponse> ArchiveDocumentAsync(Guid leadId, Guid documentId, CancellationToken ct)
@@ -221,29 +233,50 @@ public sealed class ProcessService(IProcessRepository processes, ILeadRepository
     public async Task<DocumentDownloadResponse> GetContractDownloadAsync(Guid leadId, CancellationToken ct)
     {
         EnsureContractRead();
-        await GetLeadAsync(leadId, ct); var contract = await GetContractEntityAsync(leadId, ct);
+        var lead = await GetLeadAsync(leadId, ct); var contract = await GetContractEntityAsync(leadId, ct);
         var key = contract.SignedPdfObjectKey ?? contract.CurrentPdfObjectKey;
         if (string.IsNullOrWhiteSpace(key)) throw new NotFoundException("Contract document has not been generated.");
         var expires = DateTimeOffset.UtcNow.AddMinutes(5);
-        return new DocumentDownloadResponse(contract.Id, await storage.CreateDownloadUrlAsync(key, expires, ct), expires);
+        var suffix = contract.Status == ContractStatus.Signed ? "Signed" : "Draft";
+        return new DocumentDownloadResponse(contract.Id,
+            await storage.CreateDownloadUrlAsync(key, $"Dr-Care-Franchise-Agreement-{SafeDownloadName(lead.FullName)}-{suffix}.pdf", "application/pdf", expires, ct), expires);
     }
 
     public async Task<ContractResponse> GenerateContractAsync(Guid leadId, GenerateContractRequest request, CancellationToken ct)
     {
         EnsureContractDraftAccess(); var lead = await GetLeadAsync(leadId, ct); EnsureExpectedVersion(lead, request.ExpectedVersion); EnsureContractDraftStage(lead);
+        if (!string.Equals(request.TemplateCode.Trim(), "STANDARD_FRANCHISE", StringComparison.OrdinalIgnoreCase))
+            throw new ValidationException("Select the Dr. Care Animal Bite Clinic Franchise Agreement template.");
+        if (lead.ProductLine is not (ProductLine.Abc or ProductLine.Combo))
+            throw new ConflictException("The configured agreement is for Animal Bite Clinic franchises. Select the correct product line before generating it.");
+        if (string.IsNullOrWhiteSpace(lead.Address))
+            throw new ConflictException("Complete the franchisee address before generating the agreement.");
+        if (string.IsNullOrWhiteSpace(lead.PreferredLocation))
+            throw new ConflictException("Complete the proposed franchise site before generating the agreement.");
+        if ((lead.ActualPrice ?? lead.ListPrice ?? 0m) <= 0m)
+            throw new ConflictException("Configure the initial franchise fee before generating the agreement.");
         var contract = await processes.GetContractAsync(currentUser.OrganizationId, leadId, ct);
         var created = contract is null;
         if (contract is null) { contract = new Contract(currentUser.OrganizationId, leadId, request.TemplateCode.Trim(), request.Version.Trim()); await processes.AddContractAsync(contract, ct); }
         else contract.UpdateTemplate(request.TemplateCode, request.Version);
-        var html = RenderTemplate("Contracts", "franchise-agreement.html", new Dictionary<string, string?>
+        var agreementDate = DateTimeOffset.UtcNow.ToOffset(TimeSpan.FromHours(8));
+        var agreementAmount = lead.ActualPrice ?? lead.ListPrice ?? 0m;
+        var overlayHtml = RenderTemplate("Contracts", "franchise-agreement-abc-overlays.html", new Dictionary<string, string?>
         {
-            ["contractNumber"] = contract.Id.ToString("N").ToUpperInvariant(), ["fullName"] = lead.FullName, ["email"] = lead.Email, ["contactNumber"] = lead.ContactNumber,
-            ["address"] = lead.Address ?? "Not provided", ["productLine"] = lead.ProductLine?.ToString() ?? "Not selected", ["listPrice"] = lead.ListPrice?.ToString("N2") ?? "0.00",
-            ["actualPrice"] = lead.ActualPrice?.ToString("N2") ?? "0.00", ["date"] = DateTimeOffset.UtcNow.ToString("yyyy-MM-dd")
+            ["fullNameUpper"] = lead.FullName.Trim().ToUpperInvariant(),
+            ["franchiseeAddress"] = lead.Address.Trim(),
+            ["franchisedSite"] = lead.PreferredLocation.Trim(),
+            ["effectiveDate"] = agreementDate.ToString("MMMM d, yyyy", System.Globalization.CultureInfo.InvariantCulture),
+            ["initialFranchiseFee"] = $"Php {agreementAmount:N2}",
+            ["signingDateLong"] = FormatLegalDate(agreementDate),
+            ["seriesYear"] = agreementDate.Year.ToString(System.Globalization.CultureInfo.InvariantCulture)
         });
-        var pdf = await pdfRenderer.RenderHtmlAsync(html, ct);
+        var masterPath = Path.Combine(AppContext.BaseDirectory, "Templates", "Contracts", "franchise-agreement-abc-master.pdf");
+        if (!File.Exists(masterPath)) throw new InvalidOperationException("The ABC franchise agreement master PDF is missing.");
+        await using var master = File.OpenRead(masterPath);
+        var pdf = await pdfRenderer.RenderPdfTemplateAsync(master, overlayHtml, ct);
         var key = $"private/{currentUser.OrganizationId:N}/leads/{lead.Id:N}/contracts/{contract.Id:N}-draft.pdf";
-        await storage.PutAsync(key, "application/pdf", pdf, ct); contract.SetRenderedDocument(html, key);
+        await storage.PutAsync(key, "application/pdf", pdf, ct); contract.SetRenderedDocument(overlayHtml, key);
         if (lead.State == LeadState.DownPaymentConfirmed) lead.MoveTo(LeadState.DownPaymentConfirmed, LeadState.ContractDrafting);
         else if (lead.State == LeadState.ContractReview && contract.Status == ContractStatus.RevisionRequested) lead.MoveTo(LeadState.ContractReview, LeadState.ContractDrafting);
         await AddAuditAsync(lead, ActivityType.ContractGenerated, "Contract generated from the configured template.", ct);
@@ -277,7 +310,16 @@ public sealed class ProcessService(IProcessRepository processes, ILeadRepository
     {
         if (currentUser.Role != UserRole.GeneralManager) throw new ForbiddenException("Only the General Manager can request a contract revision.");
         var lead = await GetLeadAsync(leadId, ct); EnsureExpectedVersion(lead, request.ExpectedVersion); if (lead.State != LeadState.ContractReview) throw new ConflictException("Only a contract in review can be returned for revision.");
-        var contract = await GetContractEntityAsync(leadId, ct); contract.RequestRevision(); lead.MoveTo(LeadState.ContractReview, LeadState.ContractDrafting); await AddAuditAsync(lead, ActivityType.ContractRevisionRequested, $"Contract returned for revision: {request.Reason}", ct); await processes.SaveChangesAsync(ct); return ToContract(contract);
+        var contract = await GetContractEntityAsync(leadId, ct);
+        var reason = request.Reason.Trim();
+        contract.RequestRevision(reason, currentUser.UserId, currentUser.DisplayName);
+        lead.MoveTo(LeadState.ContractReview, LeadState.ContractDrafting);
+        await AddAuditAsync(lead, ActivityType.ContractRevisionRequested, $"Contract returned for revision: {reason}", ct);
+        var notificationReason = reason.Length <= 1500 ? reason : reason[..1500] + "…";
+        await notifications.NotifyUserAsync(currentUser.OrganizationId, lead.AssignedAgentId, "contract-revision-requested", "Contract returned for revision", $"The General Manager returned {lead.FullName}'s contract. Reason: {notificationReason}", ct);
+        await notifications.NotifyRoleAsync(currentUser.OrganizationId, UserRole.MarketingAdmin, "contract-revision-requested", "Contract returned for revision", $"The General Manager returned {lead.FullName}'s contract. Reason: {notificationReason}", ct, lead.AssignedAgentId);
+        await processes.SaveChangesAsync(ct);
+        return ToContract(contract);
     }
 
     public async Task<ContractChecklistResponse> GetContractChecklistAsync(Guid leadId, CancellationToken ct)
@@ -323,7 +365,11 @@ public sealed class ProcessService(IProcessRepository processes, ILeadRepository
                 .Append(new HandoffBoundaryItem("ADMIN_ONBOARDING", "Admin onboarding and downstream operations", false, true))
                 .ToArray();
         var endorsement = new Endorsement(currentUser.OrganizationId, leadId, currentUser.UserId, "Admin Team", request.HandoffNotes.Trim(), JsonSerializer.Serialize(boundary));
-        await processes.AddEndorsementAsync(endorsement, ct); lead.MoveTo(LeadState.PreLaunch, LeadState.EndorsedToAdmin); await AddAuditAsync(lead, ActivityType.EndorsementCreated, "Endorsement record created and handed to Admin.", ct); await notifications.NotifyRoleAsync(currentUser.OrganizationId, UserRole.AdminTeam, "endorsement-created", "Endorsement ready", $"{lead.FullName} has been endorsed to the Admin Team.", ct); await processes.SaveChangesAsync(ct); return ToEndorsement(endorsement);
+        await processes.AddEndorsementAsync(endorsement, ct); lead.MoveTo(LeadState.PreLaunch, LeadState.EndorsedToAdmin); await AddAuditAsync(lead, ActivityType.EndorsementCreated, "Endorsement record created and handed to Admin.", ct); await notifications.NotifyRoleAsync(currentUser.OrganizationId, UserRole.AdminTeam, "endorsement-created", "Endorsement ready", $"{lead.FullName} has been endorsed to the Admin Team.", ct);
+        var handoff = emailComposer.Compose(new BrandedEmailRequest(lead.ProductLine, "Your application has reached onboarding.", "Endorsed to our Admin Team", $"Hello {lead.FullName},",
+            ["Your pre-launch requirements are complete and your franchise application has been endorsed to our Admin Team.", "The team will coordinate the next onboarding and downstream operational steps with you."], Details: [new("Receiving team", "Admin Team")]));
+        await emailQueue.EnqueueAsync(new QueueEmailRequest(lead.OrganizationId, lead.Email, lead.FullName, "Your Dr. Care application has been endorsed", handoff.Html, handoff.Text,
+            "endorsement", IdempotencyKey: $"endorsement:{endorsement.Id}:franchisee"), ct); return ToEndorsement(endorsement);
     }
 
     public async Task<EndorsementResponse?> GetEndorsementAsync(Guid leadId, CancellationToken ct)
@@ -412,10 +458,27 @@ public sealed class ProcessService(IProcessRepository processes, ILeadRepository
             .All(type => docs.Any(x => x.DocumentType == type && x.Status == DocumentStatus.Uploaded));
     }
     private static string NormalizeCurrency(string currency) { var value = currency.Trim().ToUpperInvariant(); if (value.Length != 3 || value.Any(c => c < 'A' || c > 'Z')) throw new ValidationException("Currency must be a three-letter code."); return value; }
+    private static bool IsPreLaunchDocumentType(string type) => type switch
+    {
+        "DOH_FLOOR_PLAN" or "LEASE_AND_ADDRESS" or "DTI_REGISTRATION" or "SITE_PHOTOS" or "PERMITS"
+            or "BUSINESS_PLAN" or "VALID_ID_TIN" or "FRANCHISE_AGREEMENT" or "TRAINING_APPLICATION" or "PHARMACY_PERMITS" => true,
+        _ => false
+    };
     private static void ValidateDocumentRequest(CreateUploadIntentRequest request)
     {
-        var types = new[] { "VALID_ID_SIGNATURES", "FLOOR_PLAN", "PERSPECTIVE", "SIGNED_CONTRACT", "PAYMENT_RECEIPT" };
+        // Pre-launch checklist documents use their checklist code as the document type.
+        // Keeping the code on the document lets the UI show exactly which requirement
+        // the file satisfies while still using the same private storage workflow.
+        var types = new[]
+        {
+            "VALID_ID_SIGNATURES", "FLOOR_PLAN", "PERSPECTIVE", "SIGNED_CONTRACT", "PAYMENT_RECEIPT",
+            "DOH_FLOOR_PLAN", "LEASE_AND_ADDRESS", "DTI_REGISTRATION", "SITE_PHOTOS", "PERMITS",
+            "BUSINESS_PLAN", "VALID_ID_TIN", "FRANCHISE_AGREEMENT", "TRAINING_APPLICATION", "PHARMACY_PERMITS"
+        };
         var contentTypes = new[] { "application/pdf", "image/jpeg", "image/png" };
+        var trimmedFileName = request.FileName.Trim();
+        if (trimmedFileName.Length is 0 or > 200 || trimmedFileName != Path.GetFileName(trimmedFileName) || trimmedFileName.Contains('\r') || trimmedFileName.Contains('\n'))
+            throw new ValidationException("File name must be a plain file name with no folder path.");
         var extension = Path.GetExtension(request.FileName).ToLowerInvariant();
         if (!types.Contains(request.DocumentType.Trim().ToUpperInvariant())) throw new ValidationException("Unsupported document type.");
         if (!contentTypes.Contains(request.ContentType.Trim().ToLowerInvariant())) throw new ValidationException("Unsupported content type.");
@@ -431,9 +494,19 @@ public sealed class ProcessService(IProcessRepository processes, ILeadRepository
         "PERSPECTIVE" => "Perspective",
         "SIGNED_CONTRACT" => "Signed contract",
         "PAYMENT_RECEIPT" => "Payment receipt or bank confirmation",
+        "DOH_FLOOR_PLAN" => "DOH floor plan and device layout",
+        "LEASE_AND_ADDRESS" => "Lease contract and exact site address",
+        "DTI_REGISTRATION" => "DTI registration",
+        "SITE_PHOTOS" => "Site photos",
+        "PERMITS" => "Business permits",
+        "BUSINESS_PLAN" => "Franchisee business plan",
+        "VALID_ID_TIN" => "Valid ID and TIN",
+        "FRANCHISE_AGREEMENT" => "Signed franchise agreement",
+        "TRAINING_APPLICATION" => "Training application",
+        "PHARMACY_PERMITS" => "Pharmacy licenses and permits",
         _ => "Document"
     };
-    private static ContractResponse ToContract(Contract x) => new(x.LeadId, x.Id, x.Status.ToString(), x.TemplateCode, x.TemplateVersion, x.UpdatedAt, null, x.GmApproved, x.FranchiseeSignerName, x.FranchiseeSignedAt, x.DrCareSignerName, x.DrCareSignedAt);
+    private static ContractResponse ToContract(Contract x) => new(x.LeadId, x.Id, x.Status.ToString(), x.TemplateCode, x.TemplateVersion, x.UpdatedAt, null, x.GmApproved, x.FranchiseeSignerName, x.FranchiseeSignedAt, x.DrCareSignerName, x.DrCareSignedAt, x.RevisionReason, x.RevisionRequestedAt, x.RevisionRequestedBy, x.RevisionRequestedByName);
     private static List<ContractChecklistItem> DefaultChecklist() => [
         new(Guid.NewGuid(), "IDENTITY_VERIFIED", "Franchisee identity verified", true, false, null),
         new(Guid.NewGuid(), "COMMERCIAL_TERMS_REVIEWED", "Commercial terms reviewed", true, false, null),
@@ -441,6 +514,14 @@ public sealed class ProcessService(IProcessRepository processes, ILeadRepository
     private static EndorsementResponse ToEndorsement(Endorsement x) => new(x.Id, x.LeadId, x.ReceivingTeam, x.Status.ToString(), x.HandoffNotes, JsonSerializer.Deserialize<List<HandoffBoundaryItem>>(x.BoundaryJson) ?? [], x.CreatedAt, x.AcknowledgedAt);
     private async Task AddAuditAsync(Lead lead, ActivityType type, string message, CancellationToken ct) { var activity = new ActivityLog(currentUser.OrganizationId, lead.Id, currentUser.UserId, type, message); lead.AddActivity(activity); await leads.AddActivityAsync(activity, ct); }
     private static string Sha256(ReadOnlySpan<byte> value) => Convert.ToHexString(SHA256.HashData(value)).ToLowerInvariant();
+    private static string FormatLegalDate(DateTimeOffset value)
+    {
+        var day = value.Day;
+        var suffix = day % 100 is 11 or 12 or 13
+            ? "th"
+            : (day % 10) switch { 1 => "st", 2 => "nd", 3 => "rd", _ => "th" };
+        return $"{day}{suffix} day of {value:MMMM, yyyy}";
+    }
     private static string RenderTemplate(string folder, string fileName, IReadOnlyDictionary<string, string?> values)
     {
         var path = Path.Combine(AppContext.BaseDirectory, "Templates", folder, fileName);
@@ -448,6 +529,14 @@ public sealed class ProcessService(IProcessRepository processes, ILeadRepository
         var html = File.ReadAllText(path);
         foreach (var pair in values) html = html.Replace("{{" + pair.Key + "}}", WebUtility.HtmlEncode(pair.Value ?? string.Empty), StringComparison.Ordinal);
         return html;
+    }
+
+    private static string SafeDownloadName(string value)
+    {
+        var invalid = Path.GetInvalidFileNameChars();
+        var safe = new string(value.Trim().Select(character => invalid.Contains(character) ? '-' : character).ToArray());
+        if (string.IsNullOrWhiteSpace(safe)) return "Franchisee";
+        return safe.Length <= 120 ? safe : safe[..120].TrimEnd();
     }
     private static NotificationResponse ToNotification(Notification x) => new(x.Id, x.Type, x.Title, x.Message, x.Read, x.CreatedAt);
 }

@@ -43,6 +43,8 @@ public sealed class PlannedTasksController(ITaskService tasks) : ControllerBase
 {
     [HttpGet]
     public async Task<ActionResult<IReadOnlyList<TaskResponse>>> List([FromQuery] Guid? leadId, CancellationToken ct) => Ok(await tasks.ListAsync(leadId, ct));
+    [HttpGet("completed")]
+    public async Task<ActionResult<PagedResponse<CompletedWorkItemResponse>>> Completed([FromQuery] int page = 1, CancellationToken ct = default) => Ok(await tasks.ListCompletedWorkAsync(page, ct));
     [HttpPost]
     public async Task<ActionResult<TaskResponse>> Create(CreateTaskRequest request, CancellationToken ct) => Ok(await tasks.CreateAsync(request, null, ct));
     [HttpGet("{taskId:guid}")]

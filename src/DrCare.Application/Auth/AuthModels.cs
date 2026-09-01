@@ -26,7 +26,7 @@ public interface IAuthService
     UserProfile GetCurrentUser();
 }
 
-public sealed class AuthService(IUserRepository users, IAuthTokenRepository authTokens, IPasswordService passwords, ITokenService tokens, ICurrentUser currentUser) : IAuthService
+public sealed class AuthService(IUserRepository users, IAuthTokenRepository authTokens, IPasswordService passwords, ITokenService tokens, ICurrentUser currentUser, IEmailQueue emailQueue, IEmailComposer emailComposer, IApplicationLinks links) : IAuthService
 {
     public async Task<LoginResponse> LoginAsync(LoginRequest request, CancellationToken cancellationToken)
     {
@@ -63,8 +63,13 @@ public sealed class AuthService(IUserRepository users, IAuthTokenRepository auth
         if (user is not null && user.IsActive)
         {
             var rawToken = Convert.ToBase64String(RandomNumberGenerator.GetBytes(48));
-            await authTokens.AddPasswordResetTokenAsync(new PasswordResetToken(user.Id, HashToken(rawToken), DateTimeOffset.UtcNow.AddMinutes(30)), cancellationToken);
-            // The raw token is handed to the future email provider and is never persisted or logged.
+            var reset = new PasswordResetToken(user.Id, HashToken(rawToken), DateTimeOffset.UtcNow.AddMinutes(30));
+            await authTokens.AddPasswordResetTokenAsync(reset, cancellationToken);
+            var url = links.PasswordReset(rawToken, user.Email);
+            var content = emailComposer.Compose(new BrandedEmailRequest(null, "Reset your Dr. Care password.", "Reset your password", $"Hello {user.DisplayName},",
+                ["We received a request to reset your Dr. Care account password.", "This secure link expires in 30 minutes. If you did not request this, you can safely ignore this email."], "Reset password", url));
+            await emailQueue.EnqueueAsync(new QueueEmailRequest(user.OrganizationId, user.Email, user.DisplayName, "Reset your Dr. Care password", content.Html, content.Text,
+                "password-reset", IdempotencyKey: $"password-reset:{reset.Id}"), cancellationToken);
         }
         await authTokens.SaveChangesAsync(cancellationToken);
     }

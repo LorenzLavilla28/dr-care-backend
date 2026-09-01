@@ -21,6 +21,11 @@ using Microsoft.IdentityModel.Tokens;
 
 var builder = WebApplication.CreateBuilder(args);
 
+// Keep real development credentials in an ignored local override. The tracked
+// Development settings remain safe to commit and the override is optional.
+if (builder.Environment.IsDevelopment())
+    builder.Configuration.AddJsonFile("appsettings.Development.local.json", optional: true, reloadOnChange: true);
+
 var configuredStorageProvider = builder.Configuration["Storage:Provider"]?.Trim();
 if (!builder.Environment.IsDevelopment() &&
     (configuredStorageProvider?.Equals("Local", StringComparison.OrdinalIgnoreCase) == true ||

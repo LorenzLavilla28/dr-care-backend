@@ -17,5 +17,8 @@ ENV ASPNETCORE_URLS=http://+:8080
 ENV CHROME_BIN=/usr/bin/chromium
 EXPOSE 8080
 COPY --from=build /app/publish .
+# The final image runs as the non-root APP_UID user. Prepare the named-volume
+# mount point so local document uploads work on Docker Desktop and Colima.
+RUN mkdir -p /tmp/dr-care-storage && chown -R $APP_UID /tmp/dr-care-storage
 USER $APP_UID
 ENTRYPOINT ["dotnet", "DrCare.Api.dll"]

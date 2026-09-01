@@ -4,16 +4,16 @@ namespace DrCare.Application.Notifications;
 
 public interface INotificationService
 {
-    Task NotifyRoleAsync(Guid organizationId, UserRole role, string type, string title, string message, CancellationToken cancellationToken);
+    Task NotifyRoleAsync(Guid organizationId, UserRole role, string type, string title, string message, CancellationToken cancellationToken, Guid? excludeUserId = null);
     Task NotifyUserAsync(Guid organizationId, Guid userId, string type, string title, string message, CancellationToken cancellationToken);
 }
 
 public sealed class NotificationService(IUserRepository users, IProcessRepository processes) : INotificationService
 {
-    public async Task NotifyRoleAsync(Guid organizationId, UserRole role, string type, string title, string message, CancellationToken cancellationToken)
+    public async Task NotifyRoleAsync(Guid organizationId, UserRole role, string type, string title, string message, CancellationToken cancellationToken, Guid? excludeUserId = null)
     {
         var recipients = await users.ListAsync(organizationId, cancellationToken);
-        foreach (var recipient in recipients.Where(x => x.IsActive && x.Role == role))
+        foreach (var recipient in recipients.Where(x => x.IsActive && x.Role == role && x.Id != excludeUserId))
             await processes.AddNotificationAsync(new Notification(organizationId, recipient.Id, type, title, message), cancellationToken);
     }
 

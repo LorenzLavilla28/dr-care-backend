@@ -63,7 +63,11 @@ public enum ActivityType
     EndorsementCreated,
     EndorsementAcknowledged,
     DocumentArchived,
-    LeadAssigned
+    LeadAssigned,
+    LocationAnalysisUpdated,
+    LocationAnalysisSubmitted,
+    LocationAnalysisApproved,
+    LocationAnalysisReturned
 }
 
 public enum TaskStatus
@@ -110,4 +114,13 @@ public enum SigningRequestStatus
     Declined,
     Voided,
     Expired
+}
+
+public enum EmailDeliveryStatus
+{
+    Pending,
+    Processing,
+    Sent,
+    Failed,
+    Cancelled
 }
