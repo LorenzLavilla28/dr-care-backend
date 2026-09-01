@@ -145,7 +145,7 @@ If you changed backend code or email settings, use `docker compose up -d --build
 
 Email settings are read from:
 
-`dr-care-backend/src/DrCare.Api/appsettings.Development.local.json`
+`src/DrCare.Api/appsettings.Development.local.json` (inside the `dr-care-backend` folder)
 
 After adding or changing those settings, rebuild the backend:
 
@@ -226,5 +226,4 @@ Check the Microsoft Graph tenant, client, secret, sender mailbox, Mail.Send perm
 ## Important safety note
 
 This setup is for local development only. Never use the shared development password or local JSON credentials in production. Never commit `.env` or `appsettings.Development.local.json`.
-
 
