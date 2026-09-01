@@ -33,7 +33,7 @@ State-changing workflow operations use explicit action routes. There is intentio
 
 For the complete macOS setup with Colima, email configuration, health checks, and troubleshooting, see [docs/MAC_COLIMA_RUN_GUIDE.md](docs/MAC_COLIMA_RUN_GUIDE.md).
 
-1. Copy `.env.example` to `.env` and replace every placeholder.
+1. Copy `.env.example` to `.env`. It contains safe Development-only defaults for the local database, JWT, seed-account password, and local storage; change them only if you want different local values.
 2. Start PostgreSQL and the API with `docker compose up --build`.
 3. Local development seeds the named test accounts below using `DEVELOPMENT_ADMIN_PASSWORD`.
 

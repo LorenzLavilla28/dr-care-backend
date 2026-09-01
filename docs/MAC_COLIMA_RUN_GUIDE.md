@@ -59,19 +59,19 @@ open -e .env
 open -e src/DrCare.Api/appsettings.Development.local.json
 ```
 
-In `.env`, make sure these values are filled in:
+The copied `.env` already contains Development-only local defaults, so you can continue without changing it. If you prefer different local values, edit it with `open -e .env`. The defaults are:
 
 ```text
-POSTGRES_PASSWORD=your-local-database-password
-JWT_SIGNING_KEY=your-local-login-key-at-least-32-characters
+POSTGRES_PASSWORD=DrCareLocalDbPassword123!
+JWT_SIGNING_KEY=DrCareLocalJwtKey_ChangeThis_123456789
 DEVELOPMENT_ADMIN_PASSWORD=DrCareAdminPassword123!
 STORAGE__PROVIDER=Local
-LOCAL_STORAGE_SECRET=your-local-storage-secret
+LOCAL_STORAGE_SECRET=DrCareLocalStorageSecret_ChangeThis_123456789
 ```
 
 If you want to test email, fill in the Microsoft Graph values in `appsettings.Development.local.json`. If you are not testing email yet, you can leave that file out; the rest of the application will still run.
 
-Do not edit the `.example` files. Do not share or commit `.env` or `appsettings.Development.local.json`; they contain machine-specific settings and credentials.
+These defaults are only for a local Development installation. Do not use them in production. Do not edit the `.example` files. Do not share or commit `.env` or `appsettings.Development.local.json`; they contain machine-specific settings and credentials.
 
 ### 4. Start Colima
 
@@ -226,4 +226,3 @@ Check the Microsoft Graph tenant, client, secret, sender mailbox, Mail.Send perm
 ## Important safety note
 
 This setup is for local development only. Never use the shared development password or local JSON credentials in production. Never commit `.env` or `appsettings.Development.local.json`.
-
