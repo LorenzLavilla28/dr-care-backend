@@ -1,0 +1,11 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/DrCare.Api/DrCare.Api.csproj" />
+    <Project Path="src/DrCare.Application/DrCare.Application.csproj" />
+    <Project Path="src/DrCare.Domain/DrCare.Domain.csproj" />
+    <Project Path="src/DrCare.Infrastructure/DrCare.Infrastructure.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/DrCare.UnitTests/DrCare.UnitTests.csproj" />
+  </Folder>
+</Solution>
